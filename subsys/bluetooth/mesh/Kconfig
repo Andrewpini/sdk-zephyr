@@ -101,6 +101,7 @@ config BT_MESH_PROXY
 config BT_MESH_PROXY_CLIENT
 	bool "Proxy Client support"
 	select BT_MESH_PROXY
+	select BT_GATT_CLIENT
 
 config BT_MESH_PB_GATT
 	bool "Provisioning support using GATT (PB-GATT)"

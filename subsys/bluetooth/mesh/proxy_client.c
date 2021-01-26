@@ -26,6 +26,8 @@
 
 /* ------------------------------------------------------------------------------------------------------------------ */
 
+static uint16_t listen_netidx;
+
 typedef int (*proxy_send_cb_t)(struct bt_conn *conn, const void *data,
 			       uint16_t len);
 
@@ -205,7 +207,7 @@ static bool beacon_process(struct bt_data *data, void *user_data)
 	struct bt_uuid uuid;
 	struct proxy_beacon *beacon = user_data;
 
-	BT_DBG("[AD]: %u data_len %u", data->type, data->data_len);
+	// BT_DBG("[AD]: %u data_len %u", data->type, data->data_len);
 
 	switch (data->type) {
 	case BT_DATA_FLAGS:
@@ -236,6 +238,7 @@ static bool beacon_process(struct bt_data *data, void *user_data)
 		}
 
 		if (beacon->beacon_type == PROV) {
+			BT_DBG("PROVISIONING BEACON");
 			if (data->data_len != 20U) {
 				goto failed;
 			}
@@ -291,58 +294,10 @@ failed:
 	return false;
 }
 
-// size_t bt_mesh_subnet_foreach(void (*cb)(struct bt_mesh_subnet *sub))
-// {
-// 	size_t count = 0;
-
-// 	for (int i = 0; i < ARRAY_SIZE(subnets); i++) {
-// 		if (subnets[i].net_idx == BT_MESH_KEY_UNUSED) {
-// 			continue;
-// 		}
-
-// 		cb(&subnets[i]);
-// 		count++;
-// 	}
-
-// 	return count;
-// }
-
-// void bt_mesh_proxy_beacon_send(struct bt_mesh_subnet *sub)
-// {
-// 	int i;
-
-// 	if (!sub) {
-// 		/* NULL means we send on all subnets */
-// 		bt_mesh_subnet_foreach(bt_mesh_proxy_beacon_send);
-// 		return;
-// 	}
-
-// 	for (i = 0; i < ARRAY_SIZE(clients); i++) {
-// 		if (clients[i].conn) {
-// 			beacon_send(clients[i].conn, sub);
-// 		}
-// 	}
-// }
-
-// struct bt_mesh_subnet *bt_mesh_subnet_find(int (*cb)(struct bt_mesh_subnet *sub,
-// 						     void *cb_data),
-// 					   void *cb_data)
-// {
-// 	for (int i = 0; i < ARRAY_SIZE(subnets); i++) {
-// 		if (subnets[i].net_idx == BT_MESH_KEY_UNUSED) {
-// 			continue;
-// 		}
-
-// 		if (!cb || cb(&subnets[i], cb_data)) {
-// 			return &subnets[i];
-// 		}
-// 	}
-
-// 	return NULL;
-// }
-
 static int net_id_find(struct bt_mesh_subnet *sub, void *cb_data)
 {
+	/* Decrypt */
+
 	if (!memcmp(cb_data, sub->keys[0].net_id, 8)) {
 		return 1;
 	}
@@ -357,34 +312,6 @@ static int net_id_find(struct bt_mesh_subnet *sub, void *cb_data)
 
 	return 0;
 }
-
-// /* USE: size_t bt_mesh_subnet_foreach(void (*cb)(struct bt_mesh_subnet *sub)); */
-// static struct bt_mesh_subnet *net_id_find(const uint8_t net_id[8])
-// {
-// 	int i;
-
-// 	for (i = 0; i < ARRAY_SIZE(bt_mesh.sub); i++) {
-// 		struct bt_mesh_subnet *sub = &bt_mesh.sub[i];
-
-// 		if (sub->net_idx == BT_MESH_KEY_UNUSED) {
-// 			continue;
-// 		}
-
-// 		if (!memcmp(net_id, sub[i].keys[0].net_id, 8)) {
-// 			return sub;
-// 		}
-
-// 		if (sub->kr_phase == BT_MESH_KR_NORMAL) {
-// 			continue;
-// 		}
-
-// 		if (!memcmp(net_id, sub[i].keys[1].net_id, 8)) {
-// 			return sub;
-// 		}
-// 	}
-
-// 	return NULL;
-// }
 
 struct node_user_data {
 	const uint8_t *random;
@@ -439,12 +366,39 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 
 	switch (beacon.beacon_type) {
 	case NET:
+		// bt_mesh_proxy_client_subnet_listen_set(bt_mesh_subnet_get(1));
 		if (proxy_cb && proxy_cb->network_id) {
-			// sub = net_id_find(beacon.net.id);
-			sub = bt_mesh_subnet_find(net_id_find, &beacon.net.id);
-			if (sub) {
+			BT_DBG("NETWORK ID");
+
+			// uint8_t incoming[8];
+			// memcpy(incoming,beacon.net.id,sizeof(incoming));
+
+			// for (size_t i = 0; i < 8; i++) {
+			// 	printk("%x", incoming[i]);
+			// }
+			// printk("\n");
+
+			sub = bt_mesh_subnet_get(listen_netidx);
+
+			if (!sub) {
+				break;
+			} else if (!memcmp(beacon.net.id,
+					   sub->keys[0].net_id, 8)) {
 				proxy_cb->network_id(addr, sub->net_idx);
+			} else if (sub->kr_phase ==
+				   BT_MESH_KR_NORMAL) {
+				break;
+			} else if (!memcmp(beacon.net.id,
+					   sub->keys[1].net_id, 8)) {
+				proxy_cb->network_id(addr, sub->net_idx);
+			} else {
+				break;
 			}
+
+			// sub = bt_mesh_subnet_find(net_id_find, beacon.net.id);
+			// if (sub) {
+			// 	proxy_cb->network_id(addr, sub->net_idx);
+			// }
 		}
 		break;
 	case NODE:
@@ -452,7 +406,7 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 			user_data.random = beacon.node.random;
 			user_data.hash = beacon.node.hash;
 			user_data.node = NULL;
-			bt_mesh_cdb_node_foreach(node_id_find, &user_data);
+			// bt_mesh_cdb_node_foreach(node_id_find, &user_data);
 			if (user_data.node) {
 				proxy_cb->node_id(addr, user_data.node->net_idx,
 						  user_data.node->addr);
@@ -736,21 +690,40 @@ static struct bt_conn_cb conn_callbacks = {
 	.disconnected = proxy_disconnected,
 };
 
+// TODO: REMOVE AT SOME POINT
+static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
+{
+	BT_DBG("network_id_cb: net_idx: %d", net_idx);
+}
+
+static struct bt_mesh_proxy proxy_cb_temp = {
+	.network_id = network_id_cb,
+};
+
+void bt_mesh_proxy_client_subnet_listen_set(uint16_t net_idx)
+{
+	listen_netidx = net_idx;
+}
+
 int bt_mesh_proxy_client_init(void)
 {
 	int i;
 
 	/* Initialize the client receive buffers */
+	BT_DBG("Starting Proxy Client");
 	for (i = 0; i < ARRAY_SIZE(servers); i++) {
 		struct bt_mesh_proxy_server *server = &servers[i];
 
-		// TODO: FIX
 		bt_mesh_proxy_common_init(&server->object,
-					  server_buf_data + (i * SERVER_BUF_SIZE),
+					  server_buf_data +
+						  (i * SERVER_BUF_SIZE),
 					  SERVER_BUF_SIZE);
 	}
 
 	bt_conn_cb_register(&conn_callbacks);
 
+	// TODO: REMOVE AT SOME POINT
+	bt_mesh_proxy_client_subnet_listen_set(1);
+	bt_mesh_proxy_client_set_cb(&proxy_cb_temp);
 	return 0;
 }

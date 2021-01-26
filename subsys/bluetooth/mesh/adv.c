@@ -27,6 +27,7 @@
 #include "beacon.h"
 #include "prov.h"
 #include "proxy.h"
+#include "proxy_client.h"
 
 /* Window and Interval are equal for continuous scanning */
 #define MESH_SCAN_INTERVAL    BT_MESH_ADV_SCAN_UNIT(BT_MESH_SCAN_INTERVAL_MS)
@@ -105,6 +106,11 @@ static void bt_mesh_scan_cb(const bt_addr_le_t *addr, int8_t rssi,
 			    uint8_t adv_type, struct net_buf_simple *buf)
 {
 	if (adv_type != BT_GAP_ADV_TYPE_ADV_NONCONN_IND) {
+		if (IS_ENABLED(CONFIG_BT_MESH_PROXY_CLIENT) &&
+		    adv_type == BT_GAP_ADV_TYPE_ADV_IND) {
+			bt_mesh_proxy_client_process(addr, rssi, buf);
+		}
+
 		return;
 	}
 
