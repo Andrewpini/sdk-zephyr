@@ -1,6 +1,7 @@
 
 #include <zephyr.h>
 #include <sys/byteorder.h>
+#include <sys/util.h>
 
 #include <net/buf.h>
 #include <bluetooth/bluetooth.h>
@@ -26,7 +27,25 @@
 
 /* ------------------------------------------------------------------------------------------------------------------ */
 
+#define SAR_COMPLETE       0x00
+#define SAR_FIRST          0x01
+#define SAR_CONT           0x02
+#define SAR_LAST           0x03
+
+#define BT_MESH_PROXY_NET_PDU   0x00
+#define BT_MESH_PROXY_BEACON    0x01
+#define BT_MESH_PROXY_CONFIG    0x02
+#define BT_MESH_PROXY_PROV      0x03
+
+#define CFG_FILTER_SET     0x00
+#define CFG_FILTER_ADD     0x01
+#define CFG_FILTER_REMOVE  0x02
+#define CFG_FILTER_STATUS  0x03
+
+#define PDU_HDR(sar, type) (sar << 6 | (type & BIT_MASK(6)))
+
 static uint16_t listen_netidx;
+static struct bt_gatt_exchange_params exchange_params;
 
 typedef int (*proxy_send_cb_t)(struct bt_conn *conn, const void *data,
 			       uint16_t len);
@@ -111,6 +130,13 @@ void bt_mesh_proxy_client_set_cb(struct bt_mesh_proxy *cb);
  *  @return Zero on success or (negative) error code on failure.
  */
 int bt_mesh_proxy_connect(const bt_addr_le_t *addr, uint16_t net_idx);
+
+static void exchange_func(struct bt_conn *conn, uint8_t err,
+			  struct bt_gatt_exchange_params *params)
+{
+	printk("MTU exchange %s\n", err == 0 ? "successful" : "failed");
+	printk("Current MTU: %u\n", bt_gatt_get_mtu(conn));
+}
 
 static void proxy_sar_timeout(struct k_work *work)
 {
@@ -413,7 +439,7 @@ static uint8_t proxy_notify_func(struct bt_conn *conn,
 				 const void *data, uint16_t length)
 {
 	struct bt_mesh_proxy_server *server;
-	printk("HELLO WORLD\n");
+	BT_DBG("Incoming notification: %s", bt_hex(data, length));
 	if (!data) {
 		BT_ERR("[UNSUBSCRIBED]\n");
 		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
@@ -494,8 +520,6 @@ static uint8_t proxy_discover_func(struct bt_conn *conn,
 	discover_params = &server->discover_params;
 	subscribe_params = &server->subscribe_params;
 	if (!bt_uuid_cmp(discover_params->uuid, &serv_uuid.uuid)) {
-		BT_DBG("DISCOVER: BT_UUID_MESH_PROXY");
-		BT_DBG("");
 		memcpy(&server->uuid, &char_in_uuid, sizeof(server->uuid));
 		discover_params->uuid = &server->uuid.uuid;
 		discover_params->start_handle = attr->handle + 1;
@@ -508,9 +532,7 @@ static uint8_t proxy_discover_func(struct bt_conn *conn,
 		}
 	} else if (!bt_uuid_cmp(discover_params->uuid,
 				&char_in_uuid.uuid)) {
-		BT_DBG("DISCOVER: BT_UUID_MESH_PROXY_DATA_IN");
-		BT_DBG("");
-		server->cmd_handle = attr->handle;
+		server->cmd_handle = bt_gatt_attr_value_handle(attr);
 
 		memcpy(&server->uuid, &char_out_uuid, sizeof(server->uuid));
 		discover_params->uuid = &server->uuid.uuid;
@@ -524,13 +546,11 @@ static uint8_t proxy_discover_func(struct bt_conn *conn,
 		}
 	} else if (!bt_uuid_cmp(discover_params->uuid,
 				&char_out_uuid.uuid)) {
-		BT_DBG("DISCOVER: BT_UUID_MESH_PROXY_DATA_OUT");
-		BT_DBG("");
 		memcpy(&server->uuid, BT_UUID_GATT_CCC, sizeof(server->uuid));
 		discover_params->uuid = &server->uuid.uuid;
 		discover_params->start_handle = attr->handle + 2;
 		discover_params->type = BT_GATT_DISCOVER_DESCRIPTOR;
-
+		subscribe_params->value_handle = bt_gatt_attr_value_handle(attr);
 		err = bt_gatt_discover(conn, discover_params);
 		if (err) {
 			BT_ERR("Discover failed (err %d)", err);
@@ -540,9 +560,7 @@ static uint8_t proxy_discover_func(struct bt_conn *conn,
 				BT_UUID_GATT_CCC)) {
 		subscribe_params->notify = proxy_notify_func;
 		subscribe_params->value = BT_GATT_CCC_NOTIFY;
-		subscribe_params->value_handle = 20;
 		subscribe_params->ccc_handle = attr->handle;
-		printk("Subscribe handle: %d\n", attr->handle);
 
 		err = bt_gatt_subscribe(conn, subscribe_params);
 		if (err && err != -EALREADY) {
@@ -608,6 +626,9 @@ static void proxy_connected(struct bt_conn *conn, uint8_t conn_err)
 	} else {
 		memcpy(&server->uuid, BT_UUID_MESH_PROV, sizeof(server->uuid));
 	}
+
+	exchange_params.func = exchange_func;
+	err = bt_gatt_exchange_mtu(conn, &exchange_params);
 
 	params = &server->discover_params;
 	params->uuid = &server->uuid.uuid;
@@ -680,8 +701,7 @@ static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 
 	if (err)
 	{
-		int test_err = bt_mesh_scan_enable();
-		// BT_DBG("bt_mesh_scan_enable: %d", test_err);
+		bt_mesh_scan_enable();
 	}
 
 
@@ -705,6 +725,171 @@ void cb(struct bt_conn *conn, uint8_t err,
 
 struct bt_gatt_exchange_params asd;
 
+
+
+static int proxy_client_send(struct bt_mesh_proxy_server *srv, const void *data,
+			     uint16_t length)
+{
+	int err = bt_gatt_write_without_response_cb(srv->object.conn,
+						    srv->cmd_handle, data,
+						    length, false, NULL, NULL);
+	return err;
+}
+
+static int proxy_segment_and_send(struct bt_mesh_proxy_server *srv, uint8_t type,
+				  struct net_buf_simple *msg)
+{
+	uint16_t mtu;
+
+	BT_DBG("proxy_segment_and_send: conn %p type 0x%02x len %u: %s", srv->object.conn, type, msg->len,
+	       bt_hex(msg->data, msg->len));
+
+	/* ATT_MTU - OpCode (1 byte) - Handle (2 bytes) */
+	mtu = bt_gatt_get_mtu(srv->object.conn) - 3;
+	if (mtu > msg->len) {
+		net_buf_simple_push_u8(msg, PDU_HDR(SAR_COMPLETE, type));
+		return proxy_client_send(srv, msg->data, msg->len);
+	}
+
+	net_buf_simple_push_u8(msg, PDU_HDR(SAR_FIRST, type));
+	proxy_client_send(srv, msg->data, mtu);
+	net_buf_simple_pull(msg, mtu);
+
+	while (msg->len) {
+		if (msg->len + 1 < mtu) {
+			net_buf_simple_push_u8(msg, PDU_HDR(SAR_LAST, type));
+			proxy_client_send(srv, msg->data, msg->len);
+			break;
+		}
+
+		net_buf_simple_push_u8(msg, PDU_HDR(SAR_CONT, type));
+		proxy_client_send(srv, msg->data, mtu);
+		net_buf_simple_pull(msg, mtu);
+	}
+
+	return 0;
+}
+
+static int bt_mesh_proxy_send(struct bt_conn *conn, uint8_t type,
+		       struct net_buf_simple *msg)
+{
+	struct bt_mesh_proxy_server *srv = find_server(conn);
+
+	if (!srv) {
+		BT_ERR("No Proxy Server found");
+		return -ENOTCONN;
+	}
+
+	if ((srv->type == SR_PROV) != (type == BT_MESH_PROXY_PROV)) {
+		BT_ERR("Invalid PDU type for Proxy Server");
+		return -EINVAL;
+	}
+
+	return proxy_segment_and_send(srv, type, msg);
+}
+
+static void filter_cmd_send(struct bt_mesh_proxy_server *srv,
+			       struct net_buf_simple *buf)
+{
+		struct bt_mesh_msg_ctx ctx = {
+		.net_idx = srv->net_idx,
+		.app_idx = BT_MESH_KEY_UNUSED,
+		.addr = BT_MESH_ADDR_UNASSIGNED,
+		.send_ttl = 0,
+		};
+
+	struct bt_mesh_net_tx tx = {
+		.sub = bt_mesh_subnet_get(srv->net_idx),
+		.ctx = &ctx,
+		.src = bt_mesh_primary_addr(),
+	};
+	int err;
+
+	err = bt_mesh_net_encode(&tx, buf, true);
+	if (err) {
+		BT_ERR("Encoding Proxy cfg message failed (err %d)", err);
+		return;
+	}
+
+	err = proxy_segment_and_send(srv, BT_MESH_PROXY_CONFIG, buf);
+	if (err) {
+		BT_ERR("Failed to send proxy cfg message (err %d)", err);
+	}
+}
+
+static void filter_type_set(struct bt_mesh_proxy_server *srv, bool is_blacklist)
+{
+	NET_BUF_SIMPLE_DEFINE(buf, 19 + 2);
+	net_buf_simple_reserve(&buf, 10);
+	net_buf_simple_add_u8(&buf, CFG_FILTER_SET);
+	net_buf_simple_add_u8(&buf, (is_blacklist ? 1 : 0));
+
+	BT_DBG("filter_type_set %u bytes: %s", buf.len,
+	       bt_hex(buf.data, buf.len));
+
+	filter_cmd_send(srv, &buf);
+}
+
+static void filter_addr_add(struct bt_mesh_proxy_server *srv,
+			    uint16_t *addr_arr, uint16_t len)
+{
+	NET_BUF_SIMPLE_DEFINE(buf, 19 + 1 + len);
+	net_buf_simple_reserve(&buf, 10);
+	net_buf_simple_add_u8(&buf, CFG_FILTER_ADD);
+
+	for (size_t i = 0; i < (len / sizeof(addr_arr[0])); i++)
+	{
+		net_buf_simple_add_be16(&buf, addr_arr[i]);
+	}
+
+	BT_DBG("filter_addr_add %u bytes: %s", buf.len, bt_hex(buf.data, buf.len));
+
+	filter_cmd_send(srv, &buf);
+}
+
+static void filter_addr_remove(struct bt_mesh_proxy_server *srv,
+			       uint16_t *addr_arr, uint16_t len)
+{
+	NET_BUF_SIMPLE_DEFINE(buf, 19 + 1 + len);
+	net_buf_simple_reserve(&buf, 10);
+	net_buf_simple_add_u8(&buf, CFG_FILTER_REMOVE);
+
+	for (size_t i = 0; i < (len / sizeof(addr_arr[0])); i++)
+	{
+		net_buf_simple_add_be16(&buf, addr_arr[i]);
+	}
+
+	BT_DBG("filter_addr_remove %u bytes: %s", buf.len, bt_hex(buf.data, buf.len));
+
+	filter_cmd_send(srv, &buf);
+}
+
+bool bt_mesh_proxy_cli_relay(struct net_buf_simple *buf, uint16_t dst)
+{
+	bool relayed = false;
+
+	BT_DBG("bt_mesh_proxy_relay %u bytes to dst 0x%04x", buf->len, dst);
+
+	for (int i = 0; i < ARRAY_SIZE(servers); i++) {
+		if (!servers[i].object.conn) {
+			continue;
+		}
+
+		NET_BUF_SIMPLE_DEFINE(msg, 32);
+
+		/* Proxy PDU sending modifies the original buffer,
+		 * so we need to make a copy.
+		 */
+		net_buf_simple_reserve(&msg, 1);
+		net_buf_simple_add_mem(&msg, buf->data, buf->len);
+
+		bt_mesh_proxy_send(servers[i].object.conn, BT_MESH_PROXY_NET_PDU, &msg);
+		relayed = true;
+	}
+
+	return relayed;
+}
+
 static void button_changed(uint32_t button_state, uint32_t has_changed)
 {
 	if (button_state & BIT(0)) {
@@ -720,17 +905,42 @@ static void button_changed(uint32_t button_state, uint32_t has_changed)
 							0xe7 };
 				int err = bt_gatt_write_without_response_cb(
 					servers[i].object.conn,
-					servers[i].cmd_handle + 1, test_arr,
+					servers[i].cmd_handle, test_arr,
 					sizeof(test_arr), false, NULL, NULL);
 				err = bt_gatt_write_without_response_cb(
 					servers[i].object.conn,
-					servers[i].cmd_handle + 1, test_arr2,
+					servers[i].cmd_handle, test_arr2,
 					sizeof(test_arr2), false, NULL, NULL);
 				uint16_t mtu = bt_gatt_get_mtu(servers[i].object.conn);
 				printk("MTU: %d\n", mtu);
 
 				asd.func = cb;
 				bt_gatt_exchange_mtu(servers[i].object.conn, &asd);
+			}
+		}
+	}
+
+	if (button_state & BIT(1)) {
+		printk("Button 2 pressed\n");
+
+		NET_BUF_SIMPLE_DEFINE(msg, 32);
+		net_buf_simple_add_u8(&msg, 1);
+		net_buf_simple_add_u8(&msg, 2);
+
+		bt_mesh_proxy_cli_relay(&msg,1);
+
+	}
+
+	if (button_state & BIT(2)) {
+		printk("Button 3 pressed\n");
+
+		for (int i = 0; i < ARRAY_SIZE(servers); i++) {
+			if (servers[i].object.conn) {
+				filter_type_set(&servers[i], true);
+				filter_type_set(&servers[i], false);
+				uint16_t addr[3] = { 1, 2, 3};
+				filter_addr_add(&servers[i], addr, sizeof(addr));
+				filter_addr_remove(&servers[i], addr, sizeof(addr));
 			}
 		}
 	}
