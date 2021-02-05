@@ -103,6 +103,9 @@ config BT_MESH_PROXY_CLIENT
 	select BT_MESH_PROXY
 	select BT_GATT_CLIENT
 
+config BT_MESH_PROXY_ADV_BEARER_DISABLE
+	bool "Disables the ADV bearer"
+
 config BT_MESH_PB_GATT
 	bool "Provisioning support using GATT (PB-GATT)"
 	select BT_MESH_PROXY

@@ -139,7 +139,10 @@ static void bt_mesh_scan_cb(const bt_addr_le_t *addr, int8_t rssi,
 
 		switch (type) {
 		case BT_DATA_MESH_MESSAGE:
-			bt_mesh_net_recv(buf, rssi, BT_MESH_NET_IF_ADV);
+			if (!IS_ENABLED(
+				    CONFIG_BT_MESH_PROXY_ADV_BEARER_DISABLE)) {
+				bt_mesh_net_recv(buf, rssi, BT_MESH_NET_IF_ADV);
+			}
 			break;
 #if defined(CONFIG_BT_MESH_PB_ADV)
 		case BT_DATA_MESH_PROV:

@@ -135,8 +135,11 @@ static void adv_thread(void *p1, void *p2, void *p3)
 
 		/* busy == 0 means this was canceled */
 		if (BT_MESH_ADV(buf)->busy) {
-			BT_MESH_ADV(buf)->busy = 0U;
-			adv_send(buf);
+			if (!IS_ENABLED(
+				    CONFIG_BT_MESH_PROXY_ADV_BEARER_DISABLE)) {
+				BT_MESH_ADV(buf)->busy = 0U;
+				adv_send(buf);
+			}
 		} else {
 			net_buf_unref(buf);
 		}
