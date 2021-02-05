@@ -31,6 +31,7 @@
 #include "lpn.h"
 #include "friend.h"
 #include "proxy.h"
+#include "proxy_client.h"
 #include "transport.h"
 #include "access.h"
 #include "foundation.h"
@@ -554,10 +555,12 @@ int bt_mesh_net_send(struct bt_mesh_net_tx *tx, struct net_buf *buf,
 		err = 0;
 		goto done;
 	}
-
 	bt_mesh_adv_send(buf, cb, cb_data);
 
 done:
+	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
+	bt_mesh_proxy_cli_relay(&buf->b, tx->ctx->addr);
+	#endif
 	net_buf_unref(buf);
 	return err;
 }
@@ -717,6 +720,9 @@ static void bt_mesh_net_relay(struct net_buf_simple *sbuf,
 	    (rx->friend_cred ||
 	     bt_mesh_gatt_proxy_get() == BT_MESH_GATT_PROXY_ENABLED)) {
 		bt_mesh_proxy_relay(&buf->b, rx->ctx.recv_dst);
+		#ifdef CONFIG_BT_MESH_PROXY_CLIENT
+		bt_mesh_proxy_cli_relay(&buf->b, rx->ctx.recv_dst);
+		#endif
 	}
 
 	if (relay_to_adv(rx->net_if) || rx->friend_cred) {
