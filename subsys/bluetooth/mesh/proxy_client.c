@@ -22,6 +22,8 @@
 #include "access.h"
 // #include "proxy_common.h"
 #include "proxy_client.h"
+#include "rpl.h"
+
 
 #define SERVER_BUF_SIZE 68
 
@@ -42,7 +44,10 @@
 #define CFG_FILTER_REMOVE  0x02
 #define CFG_FILTER_STATUS  0x03
 
+#define PROXY_SAR_TIMEOUT  K_SECONDS(20)
+#define PDU_SAR(data)      (data[0] >> 6)
 #define PDU_HDR(sar, type) (sar << 6 | (type & BIT_MASK(6)))
+#define PDU_TYPE(data)     (data[0] & BIT_MASK(6))
 
 static uint16_t listen_netidx;
 static struct bt_gatt_exchange_params exchange_params;
@@ -134,8 +139,8 @@ int bt_mesh_proxy_connect(const bt_addr_le_t *addr, uint16_t net_idx);
 static void exchange_func(struct bt_conn *conn, uint8_t err,
 			  struct bt_gatt_exchange_params *params)
 {
-	printk("MTU exchange %s\n", err == 0 ? "successful" : "failed");
-	printk("Current MTU: %u\n", bt_gatt_get_mtu(conn));
+	BT_DBG("MTU exchange %s", err == 0 ? "successful" : "failed");
+	BT_DBG("Current MTU: %u", bt_gatt_get_mtu(conn));
 }
 
 static void proxy_sar_timeout(struct k_work *work)
@@ -434,12 +439,145 @@ int bt_mesh_proxy_connect(const bt_addr_le_t *addr, uint16_t net_idx)
 	return 0;
 }
 
+static void proxy_cfg(struct bt_mesh_proxy_object *object)
+{
+	NET_BUF_SIMPLE_DEFINE(buf, 29);
+	struct bt_mesh_net_rx rx;
+	int err;
+
+	err = bt_mesh_net_decode(&object->buf, BT_MESH_NET_IF_PROXY_CFG,
+				 &rx, &buf);
+	if (err) {
+		BT_ERR("Failed to decode Proxy Configuration (err %d)", err);
+		return;
+	}
+
+	rx.local_match = 1U;
+
+	if (bt_mesh_rpl_check(&rx, NULL)) {
+		BT_WARN("Replay: src 0x%04x dst 0x%04x seq 0x%06x",
+			rx.ctx.addr, rx.ctx.recv_dst, rx.seq);
+		return;
+	}
+
+	/* Remove network headers */
+	net_buf_simple_pull(&buf, BT_MESH_NET_HDR_LEN);
+
+	BT_DBG("%u bytes: %s", buf.len, bt_hex(buf.data, buf.len));
+
+	if (buf.len < 1) {
+		BT_WARN("Too short proxy configuration PDU");
+		return;
+	}
+
+	// if (object->cb.recv_cb) {
+	// 	object->cb.recv_cb(object->conn, &rx, &buf);
+	// }
+}
+
+static void proxy_complete_pdu(struct bt_mesh_proxy_object *object)
+{
+	switch (object->msg_type) {
+#if defined(CONFIG_BT_MESH_GATT_PROXY)
+	case BT_MESH_PROXY_NET_PDU:
+		BT_DBG("CLI Mesh Network PDU");
+		bt_mesh_net_recv(&object->buf, 0, BT_MESH_NET_IF_PROXY);
+		break;
+	case BT_MESH_PROXY_BEACON:
+		BT_DBG("Mesh Beacon PDU");
+		bt_mesh_beacon_recv(&object->buf);
+		break;
+#endif
+#if defined(CONFIG_BT_MESH_GATT_PROXY) || \
+	defined(CONFIG_BT_MESH_PROXY_CLIENT)
+	case BT_MESH_PROXY_CONFIG:
+		BT_DBG("Mesh Configuration PDU");
+		proxy_cfg(object);
+		break;
+#endif
+#if defined(CONFIG_BT_MESH_PB_GATT)
+	case BT_MESH_PROXY_PROV:
+		BT_DBG("Mesh Provisioning PDU");
+		bt_mesh_pb_gatt_recv(object->conn, &object->buf);
+		break;
+#endif
+	default:
+		BT_WARN("Unhandled Message Type 0x%02x", object->msg_type);
+		break;
+	}
+
+	net_buf_simple_reset(&object->buf);
+}
+
+int bt_mesh_proxy_cli_recv(struct bt_mesh_proxy_object *object,
+			      const void *buf, uint16_t len)
+{
+	const uint8_t *data = buf;
+
+	switch (PDU_SAR(data)) {
+	case SAR_COMPLETE:
+		if (object->buf.len) {
+			BT_WARN("Complete PDU while a pending incomplete one");
+			return -EINVAL;
+		}
+
+		object->msg_type = PDU_TYPE(data);
+		net_buf_simple_add_mem(&object->buf, data + 1, len - 1);
+		proxy_complete_pdu(object);
+		break;
+
+	case SAR_FIRST:
+		if (object->buf.len) {
+			BT_WARN("First PDU while a pending incomplete one");
+			return -EINVAL;
+		}
+
+		k_delayed_work_submit(&object->sar_timer, PROXY_SAR_TIMEOUT);
+		object->msg_type = PDU_TYPE(data);
+		net_buf_simple_add_mem(&object->buf, data + 1, len - 1);
+		break;
+
+	case SAR_CONT:
+		if (!object->buf.len) {
+			BT_WARN("Continuation with no prior data");
+			return -EINVAL;
+		}
+
+		if (object->msg_type != PDU_TYPE(data)) {
+			BT_WARN("Unexpected message type in continuation");
+			return -EINVAL;
+		}
+
+		k_delayed_work_submit(&object->sar_timer, PROXY_SAR_TIMEOUT);
+		net_buf_simple_add_mem(&object->buf, data + 1, len - 1);
+		break;
+
+	case SAR_LAST:
+		if (!object->buf.len) {
+			BT_WARN("Last SAR PDU with no prior data");
+			return -EINVAL;
+		}
+
+		if (object->msg_type != PDU_TYPE(data)) {
+			BT_WARN("Unexpected message type in last SAR PDU");
+			return -EINVAL;
+		}
+
+		k_delayed_work_cancel(&object->sar_timer);
+		net_buf_simple_add_mem(&object->buf, data + 1, len - 1);
+		proxy_complete_pdu(object);
+		break;
+	}
+
+	return len;
+}
+
 static uint8_t proxy_notify_func(struct bt_conn *conn,
 				 struct bt_gatt_subscribe_params *params,
 				 const void *data, uint16_t length)
 {
 	struct bt_mesh_proxy_server *server;
-	BT_DBG("Incoming notification: %s", bt_hex(data, length));
+	BT_DBG("CLI Incoming notification: %s", bt_hex(data, length));
 	if (!data) {
 		BT_ERR("[UNSUBSCRIBED]\n");
 		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
@@ -452,8 +590,8 @@ static uint8_t proxy_notify_func(struct bt_conn *conn,
 		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 		return BT_GATT_ITER_STOP;
 	}
-	// TODO: FIX
-	// bt_mesh_proxy_common_recv(&server->object, data, length);
+
+	bt_mesh_proxy_cli_recv(&server->object, data, length);
 
 	return BT_GATT_ITER_CONTINUE;
 }
@@ -477,254 +615,6 @@ static int proxy_send(struct bt_conn *conn, const void *data,
 	return bt_gatt_write_without_response(conn, server->cmd_handle,
 					      data, len, false);
 }
-
-static uint8_t proxy_discover_func(struct bt_conn *conn,
-				   const struct bt_gatt_attr *attr,
-				   struct bt_gatt_discover_params *params)
-{
-	int err;
-	struct bt_mesh_proxy_server *server;
-	struct bt_gatt_discover_params *discover_params;
-	struct bt_gatt_subscribe_params *subscribe_params;
-	struct bt_uuid_16 serv_uuid, char_in_uuid, char_out_uuid;
-
-	if (!attr) {
-		BT_DBG("Discover complete");
-		(void)memset(params, 0, sizeof(*params));
-		return BT_GATT_ITER_STOP;
-	}
-
-	server = find_server(conn);
-	if (!server) {
-		BT_ERR("Unabled find server object");
-		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		return BT_GATT_ITER_STOP;
-	}
-
-	BT_DBG("[ATTRIBUTE] handle %u", attr->handle);
-
-	if (server->type == SR_NETWORK) {
-		memcpy(&serv_uuid, BT_UUID_MESH_PROXY, sizeof(serv_uuid));
-		memcpy(&char_in_uuid, BT_UUID_MESH_PROXY_DATA_IN,
-		       sizeof(char_in_uuid));
-		memcpy(&char_out_uuid, BT_UUID_MESH_PROXY_DATA_OUT,
-		       sizeof(char_out_uuid));
-	} else {
-		memcpy(&serv_uuid, BT_UUID_MESH_PROV, sizeof(serv_uuid));
-		memcpy(&char_in_uuid, BT_UUID_MESH_PROV_DATA_IN,
-		       sizeof(char_in_uuid));
-		memcpy(&char_out_uuid, BT_UUID_MESH_PROV_DATA_OUT,
-		       sizeof(char_out_uuid));
-	}
-
-	discover_params = &server->discover_params;
-	subscribe_params = &server->subscribe_params;
-	if (!bt_uuid_cmp(discover_params->uuid, &serv_uuid.uuid)) {
-		memcpy(&server->uuid, &char_in_uuid, sizeof(server->uuid));
-		discover_params->uuid = &server->uuid.uuid;
-		discover_params->start_handle = attr->handle + 1;
-		discover_params->type = BT_GATT_DISCOVER_CHARACTERISTIC;
-
-		err = bt_gatt_discover(conn, discover_params);
-		if (err) {
-			BT_ERR("Discover failed (err %d)", err);
-			bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		}
-	} else if (!bt_uuid_cmp(discover_params->uuid,
-				&char_in_uuid.uuid)) {
-		server->cmd_handle = bt_gatt_attr_value_handle(attr);
-
-		memcpy(&server->uuid, &char_out_uuid, sizeof(server->uuid));
-		discover_params->uuid = &server->uuid.uuid;
-		discover_params->start_handle = attr->handle + 1;
-		discover_params->type = BT_GATT_DISCOVER_CHARACTERISTIC;
-
-		err = bt_gatt_discover(conn, discover_params);
-		if (err) {
-			BT_ERR("Discover failed (err %d)", err);
-			bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		}
-	} else if (!bt_uuid_cmp(discover_params->uuid,
-				&char_out_uuid.uuid)) {
-		memcpy(&server->uuid, BT_UUID_GATT_CCC, sizeof(server->uuid));
-		discover_params->uuid = &server->uuid.uuid;
-		discover_params->start_handle = attr->handle + 2;
-		discover_params->type = BT_GATT_DISCOVER_DESCRIPTOR;
-		subscribe_params->value_handle = bt_gatt_attr_value_handle(attr);
-		err = bt_gatt_discover(conn, discover_params);
-		if (err) {
-			BT_ERR("Discover failed (err %d)", err);
-			bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		}
-	} else if (!bt_uuid_cmp(discover_params->uuid,
-				BT_UUID_GATT_CCC)) {
-		subscribe_params->notify = proxy_notify_func;
-		subscribe_params->value = BT_GATT_CCC_NOTIFY;
-		subscribe_params->ccc_handle = attr->handle;
-
-		err = bt_gatt_subscribe(conn, subscribe_params);
-		if (err && err != -EALREADY) {
-			BT_ERR("Subscribe failed (err %d)", err);
-			bt_conn_disconnect(conn,
-					   BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		} else {
-			BT_DBG("[SUBSCRIBED]");
-		}
-
-		return BT_GATT_ITER_STOP;
-	} else {
-		BT_ERR("UnKnown");
-		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-	}
-
-	return BT_GATT_ITER_STOP;
-}
-
-static void proxy_connected(struct bt_conn *conn, uint8_t conn_err)
-{
-	int err;
-	struct bt_mesh_proxy_server *server;
-	struct bt_gatt_discover_params *params;
-	struct bt_conn_info info;
-
-	bt_conn_get_info(conn, &info);
-	if (info.role != BT_CONN_ROLE_MASTER) {
-		return;
-	}
-
-	server = find_server(conn);
-
-	if (conn_err) {
-		BT_ERR("Failed to connect (%u)", conn_err);
-		if (server) {
-			bt_conn_unref(server->object.conn);
-			server->object.conn = NULL;
-		}
-
-		if (proxy_cb && proxy_cb->connected) {
-			proxy_cb->connected(conn, conn_err);
-		}
-
-		return;
-	}
-
-	if (!server) {
-		BT_ERR("Unabled find server object");
-		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		return;
-	}
-
-	BT_DBG("Proxy connected");
-	int test_err = bt_mesh_scan_enable();
-	BT_DBG("bt_mesh_scan_enable: %d", test_err);
-	if (proxy_cb && proxy_cb->connected) {
-		proxy_cb->connected(conn, 0);
-	}
-
-	if (server->type == SR_NETWORK) {
-		memcpy(&server->uuid, BT_UUID_MESH_PROXY, sizeof(server->uuid));
-	} else {
-		memcpy(&server->uuid, BT_UUID_MESH_PROV, sizeof(server->uuid));
-	}
-
-	exchange_params.func = exchange_func;
-	err = bt_gatt_exchange_mtu(conn, &exchange_params);
-
-	params = &server->discover_params;
-	params->uuid = &server->uuid.uuid;
-	params->func = proxy_discover_func;
-	params->start_handle = 0x0001;
-	params->end_handle = 0xffff;
-	params->type = BT_GATT_DISCOVER_PRIMARY;
-
-	err = bt_gatt_discover(conn, params);
-	if (err) {
-		BT_ERR("Discover failed(err %d)", err);
-		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		return;
-	}
-}
-
-static void proxy_disconnected(struct bt_conn *conn, uint8_t reason)
-{
-	struct bt_mesh_proxy_server *server;
-	struct bt_conn_info info;
-
-	bt_conn_get_info(conn, &info);
-	if (info.role != BT_CONN_ROLE_MASTER) {
-		return;
-	}
-
-	server = find_server(conn);
-	if (!server) {
-		BT_ERR("Unabled find server object");
-		return;
-	}
-
-	if (proxy_cb && proxy_cb->disconnected) {
-		proxy_cb->disconnected(conn, reason);
-	}
-
-	server->type = SR_NONE;
-	server->cmd_handle = 0U;
-	server->net_idx = BT_MESH_KEY_UNUSED;
-	bt_conn_unref(server->object.conn);
-	server->object.conn = NULL;
-	k_delayed_work_cancel(&server->object.sar_timer);
-
-	BT_DBG("Disconnected (reason 0x%02x)", reason);
-}
-
-void bt_mesh_proxy_client_set_cb(struct bt_mesh_proxy *cb)
-{
-	proxy_cb = cb;
-}
-
-static struct bt_conn_cb conn_callbacks = {
-	.connected = proxy_connected,
-	.disconnected = proxy_disconnected,
-};
-
-// TODO: REMOVE AT SOME POINT
-static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
-{
-	int err;
-
-	if(bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr)){
-		return;
-	}
-
-	// BT_DBG("network_id_cb: net_idx: %d", net_idx);
-	bt_mesh_scan_disable();
-	// bt_le_scan_stop();
-	err = bt_mesh_proxy_connect(addr, net_idx);
-
-	if (err)
-	{
-		bt_mesh_scan_enable();
-	}
-
-
-}
-
-static struct bt_mesh_proxy proxy_cb_temp = {
-	.network_id = network_id_cb,
-};
-
-void bt_mesh_proxy_client_subnet_listen_set(uint16_t net_idx)
-{
-	listen_netidx = net_idx;
-}
-
-#include <dk_buttons_and_leds.h>
-
-void cb(struct bt_conn *conn, uint8_t err,
-	struct bt_gatt_exchange_params *params)
-{
-}
-
-struct bt_gatt_exchange_params asd;
-
 
 
 static int proxy_client_send(struct bt_mesh_proxy_server *srv, const void *data,
@@ -864,11 +754,262 @@ static void filter_addr_remove(struct bt_mesh_proxy_server *srv,
 	filter_cmd_send(srv, &buf);
 }
 
+
+static uint8_t proxy_discover_func(struct bt_conn *conn,
+				   const struct bt_gatt_attr *attr,
+				   struct bt_gatt_discover_params *params)
+{
+	int err;
+	struct bt_mesh_proxy_server *server;
+	struct bt_gatt_discover_params *discover_params;
+	struct bt_gatt_subscribe_params *subscribe_params;
+	struct bt_uuid_16 serv_uuid, char_in_uuid, char_out_uuid;
+
+	if (!attr) {
+		BT_DBG("Discover complete");
+		(void)memset(params, 0, sizeof(*params));
+		return BT_GATT_ITER_STOP;
+	}
+
+	server = find_server(conn);
+	if (!server) {
+		BT_ERR("Unabled find server object");
+		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		return BT_GATT_ITER_STOP;
+	}
+
+	BT_DBG("[ATTRIBUTE] handle %u", attr->handle);
+
+	if (server->type == SR_NETWORK) {
+		memcpy(&serv_uuid, BT_UUID_MESH_PROXY, sizeof(serv_uuid));
+		memcpy(&char_in_uuid, BT_UUID_MESH_PROXY_DATA_IN,
+		       sizeof(char_in_uuid));
+		memcpy(&char_out_uuid, BT_UUID_MESH_PROXY_DATA_OUT,
+		       sizeof(char_out_uuid));
+	} else {
+		memcpy(&serv_uuid, BT_UUID_MESH_PROV, sizeof(serv_uuid));
+		memcpy(&char_in_uuid, BT_UUID_MESH_PROV_DATA_IN,
+		       sizeof(char_in_uuid));
+		memcpy(&char_out_uuid, BT_UUID_MESH_PROV_DATA_OUT,
+		       sizeof(char_out_uuid));
+	}
+
+	discover_params = &server->discover_params;
+	subscribe_params = &server->subscribe_params;
+	if (!bt_uuid_cmp(discover_params->uuid, &serv_uuid.uuid)) {
+		memcpy(&server->uuid, &char_in_uuid, sizeof(server->uuid));
+		discover_params->uuid = &server->uuid.uuid;
+		discover_params->start_handle = attr->handle + 1;
+		discover_params->type = BT_GATT_DISCOVER_CHARACTERISTIC;
+
+		err = bt_gatt_discover(conn, discover_params);
+		if (err) {
+			BT_ERR("Discover failed (err %d)", err);
+			bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		}
+	} else if (!bt_uuid_cmp(discover_params->uuid,
+				&char_in_uuid.uuid)) {
+		server->cmd_handle = bt_gatt_attr_value_handle(attr);
+
+		memcpy(&server->uuid, &char_out_uuid, sizeof(server->uuid));
+		discover_params->uuid = &server->uuid.uuid;
+		discover_params->start_handle = attr->handle + 1;
+		discover_params->type = BT_GATT_DISCOVER_CHARACTERISTIC;
+
+		err = bt_gatt_discover(conn, discover_params);
+		if (err) {
+			BT_ERR("Discover failed (err %d)", err);
+			bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		}
+	} else if (!bt_uuid_cmp(discover_params->uuid,
+				&char_out_uuid.uuid)) {
+		memcpy(&server->uuid, BT_UUID_GATT_CCC, sizeof(server->uuid));
+		discover_params->uuid = &server->uuid.uuid;
+		discover_params->start_handle = attr->handle + 2;
+		discover_params->type = BT_GATT_DISCOVER_DESCRIPTOR;
+		subscribe_params->value_handle = bt_gatt_attr_value_handle(attr);
+		err = bt_gatt_discover(conn, discover_params);
+		if (err) {
+			BT_ERR("Discover failed (err %d)", err);
+			bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		}
+	} else if (!bt_uuid_cmp(discover_params->uuid,
+				BT_UUID_GATT_CCC)) {
+		subscribe_params->notify = proxy_notify_func;
+		subscribe_params->value = BT_GATT_CCC_NOTIFY;
+		subscribe_params->ccc_handle = attr->handle;
+
+		err = bt_gatt_subscribe(conn, subscribe_params);
+		if (err && err != -EALREADY) {
+			BT_ERR("Subscribe failed (err %d)", err);
+			bt_conn_disconnect(conn,
+					   BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		} else {
+			BT_DBG("[SUBSCRIBED]");
+			filter_type_set(server, true);
+
+		}
+
+		return BT_GATT_ITER_STOP;
+	} else {
+		BT_ERR("UnKnown");
+		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	}
+
+	return BT_GATT_ITER_STOP;
+}
+
+static void proxy_connected(struct bt_conn *conn, uint8_t conn_err)
+{
+	int err;
+	struct bt_mesh_proxy_server *server;
+	struct bt_gatt_discover_params *params;
+	struct bt_conn_info info;
+
+	bt_conn_get_info(conn, &info);
+	if (info.role != BT_CONN_ROLE_MASTER) {
+		return;
+	}
+
+	server = find_server(conn);
+	net_buf_simple_reset(&server->object.buf);
+
+	if (conn_err) {
+		BT_ERR("Failed to connect (%u)", conn_err);
+		if (server) {
+			bt_conn_unref(server->object.conn);
+			server->object.conn = NULL;
+		}
+
+		if (proxy_cb && proxy_cb->connected) {
+			proxy_cb->connected(conn, conn_err);
+		}
+
+		return;
+	}
+
+	if (!server) {
+		BT_ERR("Unabled find server object");
+		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		return;
+	}
+
+	BT_DBG("Proxy connected");
+	int test_err = bt_mesh_scan_enable();
+	BT_DBG("bt_mesh_scan_enable: %d", test_err);
+	if (proxy_cb && proxy_cb->connected) {
+		proxy_cb->connected(conn, 0);
+	}
+
+	if (server->type == SR_NETWORK) {
+		memcpy(&server->uuid, BT_UUID_MESH_PROXY, sizeof(server->uuid));
+	} else {
+		memcpy(&server->uuid, BT_UUID_MESH_PROV, sizeof(server->uuid));
+	}
+
+	exchange_params.func = exchange_func;
+	err = bt_gatt_exchange_mtu(conn, &exchange_params);
+
+	params = &server->discover_params;
+	params->uuid = &server->uuid.uuid;
+	params->func = proxy_discover_func;
+	params->start_handle = 0x0001;
+	params->end_handle = 0xffff;
+	params->type = BT_GATT_DISCOVER_PRIMARY;
+
+	err = bt_gatt_discover(conn, params);
+	if (err) {
+		BT_ERR("Discover failed(err %d)", err);
+		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		return;
+	}
+}
+
+static void proxy_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	struct bt_mesh_proxy_server *server;
+	struct bt_conn_info info;
+
+	bt_conn_get_info(conn, &info);
+	if (info.role != BT_CONN_ROLE_MASTER) {
+		return;
+	}
+
+	server = find_server(conn);
+	if (!server) {
+		BT_ERR("Unabled find server object");
+		return;
+	}
+
+	if (proxy_cb && proxy_cb->disconnected) {
+		proxy_cb->disconnected(conn, reason);
+	}
+
+	server->type = SR_NONE;
+	server->cmd_handle = 0U;
+	server->net_idx = BT_MESH_KEY_UNUSED;
+	bt_conn_unref(server->object.conn);
+	server->object.conn = NULL;
+	k_delayed_work_cancel(&server->object.sar_timer);
+
+	BT_DBG("Disconnected (reason 0x%02x)", reason);
+}
+
+void bt_mesh_proxy_client_set_cb(struct bt_mesh_proxy *cb)
+{
+	proxy_cb = cb;
+}
+
+static struct bt_conn_cb conn_callbacks = {
+	.connected = proxy_connected,
+	.disconnected = proxy_disconnected,
+};
+
+// TODO: REMOVE AT SOME POINT
+static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
+{
+	int err;
+
+	if(bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr)){
+		return;
+	}
+
+	// BT_DBG("network_id_cb: net_idx: %d", net_idx);
+	bt_mesh_scan_disable();
+	// bt_le_scan_stop();
+	err = bt_mesh_proxy_connect(addr, net_idx);
+
+	if (err)
+	{
+		bt_mesh_scan_enable();
+	}
+
+
+}
+
+static struct bt_mesh_proxy proxy_cb_temp = {
+	.network_id = network_id_cb,
+};
+
+void bt_mesh_proxy_client_subnet_listen_set(uint16_t net_idx)
+{
+	listen_netidx = net_idx;
+}
+
+#include <dk_buttons_and_leds.h>
+
+void cb(struct bt_conn *conn, uint8_t err,
+	struct bt_gatt_exchange_params *params)
+{
+}
+
+struct bt_gatt_exchange_params asd;
+
 bool bt_mesh_proxy_cli_relay(struct net_buf_simple *buf, uint16_t dst)
 {
 	bool relayed = false;
 
-	BT_DBG("bt_mesh_proxy_relay %u bytes to dst 0x%04x", buf->len, dst);
+	BT_DBG("bt_mesh_proxy_relay CLI %u bytes to dst 0x%04x", buf->len, dst);
 
 	for (int i = 0; i < ARRAY_SIZE(servers); i++) {
 		if (!servers[i].object.conn) {
@@ -936,8 +1077,8 @@ static void button_changed(uint32_t button_state, uint32_t has_changed)
 
 		for (int i = 0; i < ARRAY_SIZE(servers); i++) {
 			if (servers[i].object.conn) {
-				filter_type_set(&servers[i], true);
 				filter_type_set(&servers[i], false);
+				filter_type_set(&servers[i], true);
 				uint16_t addr[3] = { 1, 2, 3};
 				filter_addr_add(&servers[i], addr, sizeof(addr));
 				filter_addr_remove(&servers[i], addr, sizeof(addr));
@@ -955,16 +1096,22 @@ int bt_mesh_proxy_client_init(void)
 	for (i = 0; i < ARRAY_SIZE(servers); i++) {
 		struct bt_mesh_proxy_server *server = &servers[i];
 
-		bt_mesh_proxy_common_init(&server->object,
-					  server_buf_data +
-						  (i * SERVER_BUF_SIZE),
-					  SERVER_BUF_SIZE);
+		// bt_mesh_proxy_common_init(&server->object,
+		// 			  server_buf_data +
+		// 				  (i * SERVER_BUF_SIZE),
+		// 			  SERVER_BUF_SIZE);
+
+		server->object.buf.size = SERVER_BUF_SIZE;
+		server->object.buf.__buf = server_buf_data + (i * SERVER_BUF_SIZE);
+		// client->buf.__buf = server_buf_data + (i * SERVER_BUF_SIZE);
+
+		k_delayed_work_init(&server->object.sar_timer, proxy_sar_timeout);
 	}
 
 	bt_conn_cb_register(&conn_callbacks);
 
 	// TODO: REMOVE AT SOME POINT
-	dk_buttons_init(button_changed);
+	// dk_buttons_init(button_changed);
 	bt_mesh_proxy_client_subnet_listen_set(0);
 	bt_mesh_proxy_client_set_cb(&proxy_cb_temp);
 	return 0;
