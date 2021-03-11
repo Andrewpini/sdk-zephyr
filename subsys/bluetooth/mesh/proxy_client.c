@@ -52,6 +52,8 @@
 static uint16_t listen_netidx;
 static struct bt_gatt_exchange_params exchange_params;
 
+static bool start_conn = false;
+
 typedef int (*proxy_send_cb_t)(struct bt_conn *conn, const void *data,
 			       uint16_t len);
 
@@ -206,6 +208,19 @@ static struct bt_mesh_proxy_server *find_server(struct bt_conn *conn)
 	}
 
 	return NULL;
+}
+
+static uint8_t conn_cnt_get(void)
+{
+	uint8_t cnt = 0;
+
+	for (int i = 0; i < ARRAY_SIZE(servers); i++) {
+		if (servers[i].object.conn ) {
+			cnt++;
+		}
+	}
+
+	return cnt;
 }
 
 struct proxy_beacon {
@@ -577,9 +592,12 @@ static uint8_t proxy_notify_func(struct bt_conn *conn,
 				 const void *data, uint16_t length)
 {
 	struct bt_mesh_proxy_server *server;
+	BT_DBG("");
 	BT_DBG("CLI Incoming notification: %s", bt_hex(data, length));
 	if (!data) {
 		BT_ERR("[UNSUBSCRIBED]\n");
+		BT_DBG("CLI Conn count: %d", conn_cnt_get());
+
 		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 		return BT_GATT_ITER_STOP;
 	}
@@ -631,7 +649,7 @@ static int proxy_segment_and_send(struct bt_mesh_proxy_server *srv, uint8_t type
 {
 	uint16_t mtu;
 
-	BT_DBG("proxy_segment_and_send: conn %p type 0x%02x len %u: %s", srv->object.conn, type, msg->len,
+	BT_DBG("CLI proxy_segment_and_send: conn %p type 0x%02x len %u: %s", srv->object.conn, type, msg->len,
 	       bt_hex(msg->data, msg->len));
 
 	/* ATT_MTU - OpCode (1 byte) - Handle (2 bytes) */
@@ -917,6 +935,7 @@ static void proxy_connected(struct bt_conn *conn, uint8_t conn_err)
 	params->end_handle = 0xffff;
 	params->type = BT_GATT_DISCOVER_PRIMARY;
 
+	BT_DBG("CLI Conn count: %d", conn_cnt_get());
 	err = bt_gatt_discover(conn, params);
 	if (err) {
 		BT_ERR("Discover failed(err %d)", err);
@@ -953,6 +972,8 @@ static void proxy_disconnected(struct bt_conn *conn, uint8_t reason)
 	k_delayed_work_cancel(&server->object.sar_timer);
 
 	BT_DBG("Disconnected (reason 0x%02x)", reason);
+	BT_DBG("CLI Conn count: %d", conn_cnt_get());
+
 }
 
 void bt_mesh_proxy_client_set_cb(struct bt_mesh_proxy *cb)
@@ -974,6 +995,9 @@ static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 		return;
 	}
 
+	if(!start_conn){
+		return;
+	}
 	// BT_DBG("network_id_cb: net_idx: %d", net_idx);
 	bt_mesh_scan_disable();
 	// bt_le_scan_stop();
@@ -1009,6 +1033,7 @@ bool bt_mesh_proxy_cli_relay(struct net_buf_simple *buf, uint16_t dst)
 {
 	bool relayed = false;
 
+	BT_DBG("");
 	BT_DBG("bt_mesh_proxy_relay CLI %u bytes to dst 0x%04x", buf->len, dst);
 
 	for (int i = 0; i < ARRAY_SIZE(servers); i++) {
@@ -1085,6 +1110,12 @@ static void button_changed(uint32_t button_state, uint32_t has_changed)
 			}
 		}
 	}
+
+	if (button_state & BIT(3)) {
+		printk("Button 4 pressed\n");
+		start_conn = !start_conn;
+		printk("start_conn: %d\n", start_conn);
+	}
 }
 
 int bt_mesh_proxy_client_init(void)
@@ -1111,7 +1142,7 @@ int bt_mesh_proxy_client_init(void)
 	bt_conn_cb_register(&conn_callbacks);
 
 	// TODO: REMOVE AT SOME POINT
-	// dk_buttons_init(button_changed);
+	dk_buttons_init(button_changed);
 	bt_mesh_proxy_client_subnet_listen_set(0);
 	bt_mesh_proxy_client_set_cb(&proxy_cb_temp);
 	return 0;

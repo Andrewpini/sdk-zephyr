@@ -622,7 +622,8 @@ static bool net_decrypt(struct bt_mesh_net_rx *rx, struct net_buf_simple *in,
 		return false;
 	}
 
-	if (rx->net_if == BT_MESH_NET_IF_ADV && msg_cache_match(out)) {
+	if ((rx->net_if == BT_MESH_NET_IF_ADV && msg_cache_match(out)) ||
+	    (rx->net_if == BT_MESH_NET_IF_PROXY && msg_cache_match(out))) {
 		BT_DBG("Duplicate found in Network Message Cache");
 		return false;
 	}
