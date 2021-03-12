@@ -346,36 +346,36 @@ struct node_user_data {
 	struct bt_mesh_cdb_node *node;
 };
 
-static uint8_t node_id_find(struct bt_mesh_cdb_node *node,
-			    void *user_data)
+static struct node_id_lookup node_id_lkp = {
+	.addr = 2,
+	.net_idx = 0
+ };
+
+static bool is_node_id_match(const uint8_t *hash, const uint8_t *random)
 {
 	int err;
 	uint8_t tmp[16];
 	struct bt_mesh_subnet *sub;
-	struct node_user_data *ud = user_data;
 
 	(void)memset(tmp, 0, 6);
-	memcpy(tmp + 6, ud->random, 8);
-	sys_put_be16(node->addr, &tmp[14]);
+	memcpy(tmp + 6, random, 8);
+	sys_put_be16(node_id_lkp.addr, &tmp[14]);
 
-	sub = bt_mesh_subnet_get(node->net_idx);
+	sub = bt_mesh_subnet_get(node_id_lkp.net_idx);
 	if (sub == NULL) {
-		ud->node = NULL;
-		return BT_MESH_CDB_ITER_STOP;
+		return false;
 	}
 
 	err = bt_encrypt_be(sub->keys[SUBNET_KEY_TX_IDX(sub)].identity, tmp, tmp);
 	if (err) {
-		ud->node = NULL;
-		return BT_MESH_CDB_ITER_STOP;
+		return false;
 	}
 
-	if (!memcmp(ud->hash, tmp + 8, 8)) {
-		ud->node = node;
-		return BT_MESH_CDB_ITER_STOP;
+	if (!memcmp(hash, tmp + 8, 8)) {
+		return true;
 	}
 
-	return BT_MESH_CDB_ITER_CONTINUE;
+	return false;
 }
 
 void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
@@ -411,15 +411,28 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 		}
 		break;
 	case NODE:
+		// printk("Node ID beacon\n");
+		if(node_id_lkp.addr == 0)
+		{
+			return;
+		}
+
 		if (proxy_cb && proxy_cb->node_id) {
-			user_data.random = beacon.node.random;
-			user_data.hash = beacon.node.hash;
-			user_data.node = NULL;
-			// bt_mesh_cdb_node_foreach(node_id_find, &user_data);
-			if (user_data.node) {
-				proxy_cb->node_id(addr, user_data.node->net_idx,
-						  user_data.node->addr);
+			if (is_node_id_match(beacon.node.hash, beacon.node.random))
+			{
+				proxy_cb->node_id(addr, node_id_lkp.net_idx,
+						  node_id_lkp.addr);
 			}
+
+			// is_node_id_match(beacon.node.hash, beacon.node.random);
+			// user_data.random = beacon.node.random;
+			// user_data.hash = beacon.node.hash;
+			// user_data.node = NULL;
+			// // bt_mesh_cdb_node_foreach(node_id_find, &user_data);
+			// if (user_data.node) {
+			// 	proxy_cb->node_id(addr, user_data.node->net_idx,
+			// 			  user_data.node->addr);
+			// }
 		}
 		break;
 	default:
@@ -991,7 +1004,9 @@ static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 {
 	int err;
 
+	// BT_DBG("Incoming net adv");
 	if(bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr)){
+		// BT_DBG("Allready found address");
 		return;
 	}
 
@@ -1011,8 +1026,32 @@ static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 
 }
 
+static void node_id_cb(const bt_addr_le_t *addr, uint16_t net_idx,
+		  uint16_t node_addr)
+{
+	printk("Node ID callback\n");
+	int err;
+
+	if(bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr)){
+		BT_DBG("Allready found address");
+		return;
+	}
+
+	bt_mesh_scan_disable();
+
+	err = bt_mesh_proxy_connect(addr, net_idx);
+
+	if (err)
+	{
+		bt_mesh_scan_enable();
+	}
+	node_id_lkp.addr = 0;
+	node_id_lkp.net_idx = 0;
+}
+
 static struct bt_mesh_proxy proxy_cb_temp = {
 	.network_id = network_id_cb,
+	.node_id = node_id_cb,
 };
 
 void bt_mesh_proxy_client_subnet_listen_set(uint16_t net_idx)
@@ -1056,6 +1095,34 @@ bool bt_mesh_proxy_cli_relay(struct net_buf_simple *buf, uint16_t dst)
 	return relayed;
 }
 
+void bt_mesh_proxy_cli_node_id_ctx_set(struct node_id_lookup *ctx)
+{
+	node_id_lkp.addr = ctx->addr;
+	node_id_lkp.net_idx = ctx->net_idx;
+}
+
+static bool adv_set = true;
+void bt_mesh_proxy_cli_adv_set(bool onoff)
+{
+	adv_set = onoff;
+}
+bool bt_mesh_proxy_cli_is_adv_set(void)
+{
+	return adv_set;
+}
+
+static struct k_delayed_work auto_send;
+
+static void auto_send_data(struct k_work *work)
+{
+	for (int i = 0; i < ARRAY_SIZE(servers); i++) {
+		if (servers[i].object.conn) {
+			filter_type_set(&servers[i], true);
+		}
+	}
+	k_delayed_work_submit(&auto_send, K_MSEC(1000));
+}
+
 static void button_changed(uint32_t button_state, uint32_t has_changed)
 {
 	if (button_state & BIT(0)) {
@@ -1089,11 +1156,19 @@ static void button_changed(uint32_t button_state, uint32_t has_changed)
 	if (button_state & BIT(1)) {
 		printk("Button 2 pressed\n");
 
-		NET_BUF_SIMPLE_DEFINE(msg, 32);
-		net_buf_simple_add_u8(&msg, 1);
-		net_buf_simple_add_u8(&msg, 2);
+		// NET_BUF_SIMPLE_DEFINE(msg, 32);
+		// net_buf_simple_add_u8(&msg, 1);
+		// net_buf_simple_add_u8(&msg, 2);
 
-		bt_mesh_proxy_cli_relay(&msg,1);
+		// bt_mesh_proxy_cli_relay(&msg,1);
+		static bool run = true;
+		if(run)
+		{
+			k_delayed_work_submit(&auto_send, K_NO_WAIT);
+		} else {
+			k_delayed_work_cancel(&auto_send);
+		}
+		run = !run;
 
 	}
 
@@ -1145,5 +1220,7 @@ int bt_mesh_proxy_client_init(void)
 	dk_buttons_init(button_changed);
 	bt_mesh_proxy_client_subnet_listen_set(0);
 	bt_mesh_proxy_client_set_cb(&proxy_cb_temp);
+
+	k_delayed_work_init(&auto_send, auto_send_data);
 	return 0;
 }
