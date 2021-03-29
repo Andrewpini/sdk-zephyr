@@ -23,8 +23,27 @@
 #include "proxy_client.h"
 #include "rpl.h"
 
-#define PROXY_SAR_TIMEOUT  K_SECONDS(20)
 #define SERVER_BUF_SIZE 68
+
+#define SAR_COMPLETE       0x00
+#define SAR_FIRST          0x01
+#define SAR_CONT           0x02
+#define SAR_LAST           0x03
+
+#define BT_MESH_PROXY_NET_PDU   0x00
+#define BT_MESH_PROXY_BEACON    0x01
+#define BT_MESH_PROXY_CONFIG    0x02
+#define BT_MESH_PROXY_PROV      0x03
+
+#define CFG_FILTER_SET     0x00
+#define CFG_FILTER_ADD     0x01
+#define CFG_FILTER_REMOVE  0x02
+#define CFG_FILTER_STATUS  0x03
+
+#define PROXY_SAR_TIMEOUT  K_SECONDS(20)
+#define PDU_SAR(data)      (data[0] >> 6)
+#define PDU_HDR(sar, type) (sar << 6 | (type & BIT_MASK(6)))
+#define PDU_TYPE(data)     (data[0] & BIT_MASK(6))
 
 // ------------- Forward Declarations -------------
 
@@ -202,7 +221,6 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 	switch (beacon.beacon_type) {
 	case NET:
 		if (proxy_cb && proxy_cb->network_id) {
-		BT_DBG("Incoming Net Id beacon");
 			sub = bt_mesh_subnet_get(listen_netidx);
 
 			if (!sub) {
@@ -220,6 +238,7 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 		}
 		break;
 	case NODE:
+		BT_DBG("Incoming Node Id beacon");
 		break;
 	default:
 		break;
@@ -273,6 +292,276 @@ static int proxy_send(struct bt_conn *conn, const void *data,
 					      data, len, false);
 }
 
+static int proxy_client_send(struct bt_mesh_proxy_server *srv, const void *data,
+			     uint16_t length)
+{
+	int err = bt_gatt_write_without_response_cb(srv->object.conn,
+						    srv->cmd_handle, data,
+						    length, false, NULL, NULL);
+	return err;
+}
+
+static int proxy_segment_and_send(struct bt_mesh_proxy_server *srv, uint8_t type,
+				  struct net_buf_simple *msg)
+{
+	uint16_t mtu;
+
+	BT_DBG("CLI proxy_segment_and_send: conn %p type 0x%02x len %u: %s", srv->object.conn, type, msg->len,
+	       bt_hex(msg->data, msg->len));
+
+	/* ATT_MTU - OpCode (1 byte) - Handle (2 bytes) */
+	mtu = bt_gatt_get_mtu(srv->object.conn) - 3;
+	if (mtu > msg->len) {
+		net_buf_simple_push_u8(msg, PDU_HDR(SAR_COMPLETE, type));
+		return proxy_client_send(srv, msg->data, msg->len);
+	}
+
+	net_buf_simple_push_u8(msg, PDU_HDR(SAR_FIRST, type));
+	proxy_client_send(srv, msg->data, mtu);
+	net_buf_simple_pull(msg, mtu);
+
+	while (msg->len) {
+		if (msg->len + 1 < mtu) {
+			net_buf_simple_push_u8(msg, PDU_HDR(SAR_LAST, type));
+			proxy_client_send(srv, msg->data, msg->len);
+			break;
+		}
+
+		net_buf_simple_push_u8(msg, PDU_HDR(SAR_CONT, type));
+		proxy_client_send(srv, msg->data, mtu);
+		net_buf_simple_pull(msg, mtu);
+	}
+
+	return 0;
+}
+
+static int bt_mesh_proxy_send(struct bt_conn *conn, uint8_t type,
+		       struct net_buf_simple *msg)
+{
+	struct bt_mesh_proxy_server *srv = find_server(conn);
+
+	if (!srv) {
+		BT_ERR("No Proxy Server found");
+		return -ENOTCONN;
+	}
+
+	if ((srv->type == SR_PROV) != (type == BT_MESH_PROXY_PROV)) {
+		BT_ERR("Invalid PDU type for Proxy Server");
+		return -EINVAL;
+	}
+
+	return proxy_segment_and_send(srv, type, msg);
+}
+
+static void filter_cmd_send(struct bt_mesh_proxy_server *srv,
+			       struct net_buf_simple *buf)
+{
+		struct bt_mesh_msg_ctx ctx = {
+		.net_idx = srv->net_idx,
+		.app_idx = BT_MESH_KEY_UNUSED,
+		.addr = BT_MESH_ADDR_UNASSIGNED,
+		.send_ttl = 0,
+		};
+
+	struct bt_mesh_net_tx tx = {
+		.sub = bt_mesh_subnet_get(srv->net_idx),
+		.ctx = &ctx,
+		.src = bt_mesh_primary_addr(),
+	};
+	int err;
+
+	err = bt_mesh_net_encode(&tx, buf, true);
+	if (err) {
+		BT_ERR("Encoding Proxy cfg message failed (err %d)", err);
+		return;
+	}
+
+	err = proxy_segment_and_send(srv, BT_MESH_PROXY_CONFIG, buf);
+	if (err) {
+		BT_ERR("Failed to send proxy cfg message (err %d)", err);
+	}
+}
+
+static void filter_type_set(struct bt_mesh_proxy_server *srv, bool is_blacklist)
+{
+	NET_BUF_SIMPLE_DEFINE(buf, 19 + 2);
+	net_buf_simple_reserve(&buf, 10);
+	net_buf_simple_add_u8(&buf, CFG_FILTER_SET);
+	net_buf_simple_add_u8(&buf, (is_blacklist ? 1 : 0));
+
+	BT_DBG("filter_type_set %u bytes: %s", buf.len,
+	       bt_hex(buf.data, buf.len));
+
+	filter_cmd_send(srv, &buf);
+}
+
+static void filter_addr_add(struct bt_mesh_proxy_server *srv,
+			    uint16_t *addr_arr, uint16_t len)
+{
+	NET_BUF_SIMPLE_DEFINE(buf, 19 + 1 + len);
+	net_buf_simple_reserve(&buf, 10);
+	net_buf_simple_add_u8(&buf, CFG_FILTER_ADD);
+
+	for (size_t i = 0; i < (len / sizeof(addr_arr[0])); i++)
+	{
+		net_buf_simple_add_be16(&buf, addr_arr[i]);
+	}
+
+	BT_DBG("filter_addr_add %u bytes: %s", buf.len, bt_hex(buf.data, buf.len));
+
+	filter_cmd_send(srv, &buf);
+}
+
+static void filter_addr_remove(struct bt_mesh_proxy_server *srv,
+			       uint16_t *addr_arr, uint16_t len)
+{
+	NET_BUF_SIMPLE_DEFINE(buf, 19 + 1 + len);
+	net_buf_simple_reserve(&buf, 10);
+	net_buf_simple_add_u8(&buf, CFG_FILTER_REMOVE);
+
+	for (size_t i = 0; i < (len / sizeof(addr_arr[0])); i++)
+	{
+		net_buf_simple_add_be16(&buf, addr_arr[i]);
+	}
+
+	BT_DBG("filter_addr_remove %u bytes: %s", buf.len, bt_hex(buf.data, buf.len));
+
+	filter_cmd_send(srv, &buf);
+}
+
+static void proxy_cfg(struct bt_mesh_proxy_object *object)
+{
+	NET_BUF_SIMPLE_DEFINE(buf, 29);
+	struct bt_mesh_net_rx rx;
+	int err;
+
+	err = bt_mesh_net_decode(&object->buf, BT_MESH_NET_IF_PROXY_CFG,
+				 &rx, &buf);
+	if (err) {
+		BT_ERR("Failed to decode Proxy Configuration (err %d)", err);
+		return;
+	}
+
+	rx.local_match = 1U;
+
+	if (bt_mesh_rpl_check(&rx, NULL)) {
+		BT_WARN("Replay: src 0x%04x dst 0x%04x seq 0x%06x",
+			rx.ctx.addr, rx.ctx.recv_dst, rx.seq);
+		return;
+	}
+
+	/* Remove network headers */
+	net_buf_simple_pull(&buf, BT_MESH_NET_HDR_LEN);
+
+	BT_DBG("%u bytes: %s", buf.len, bt_hex(buf.data, buf.len));
+
+	if (buf.len < 1) {
+		BT_WARN("Too short proxy configuration PDU");
+		return;
+	}
+
+	// if (object->cb.recv_cb) {
+	// 	object->cb.recv_cb(object->conn, &rx, &buf);
+	// }
+}
+
+static void proxy_complete_pdu(struct bt_mesh_proxy_object *object)
+{
+	switch (object->msg_type) {
+#if defined(CONFIG_BT_MESH_GATT_PROXY)
+	case BT_MESH_PROXY_NET_PDU:
+		BT_DBG("CLI Mesh Network PDU");
+		bt_mesh_net_recv(&object->buf, 0, BT_MESH_NET_IF_PROXY);
+		break;
+	case BT_MESH_PROXY_BEACON:
+		BT_DBG("Mesh Beacon PDU");
+		bt_mesh_beacon_recv(&object->buf);
+		break;
+#endif
+#if defined(CONFIG_BT_MESH_GATT_PROXY) || \
+	defined(CONFIG_BT_MESH_PROXY_CLIENT)
+	case BT_MESH_PROXY_CONFIG:
+		BT_DBG("Mesh Configuration PDU");
+		proxy_cfg(object);
+		break;
+#endif
+#if defined(CONFIG_BT_MESH_PB_GATT)
+	case BT_MESH_PROXY_PROV:
+		BT_DBG("Mesh Provisioning PDU");
+		bt_mesh_pb_gatt_recv(object->conn, &object->buf);
+		break;
+#endif
+	default:
+		BT_WARN("Unhandled Message Type 0x%02x", object->msg_type);
+		break;
+	}
+
+	net_buf_simple_reset(&object->buf);
+}
+
+int bt_mesh_proxy_cli_recv(struct bt_mesh_proxy_object *object,
+			      const void *buf, uint16_t len)
+{
+	const uint8_t *data = buf;
+
+	switch (PDU_SAR(data)) {
+	case SAR_COMPLETE:
+		if (object->buf.len) {
+			BT_WARN("Complete PDU while a pending incomplete one");
+			return -EINVAL;
+		}
+
+		object->msg_type = PDU_TYPE(data);
+		net_buf_simple_add_mem(&object->buf, data + 1, len - 1);
+		proxy_complete_pdu(object);
+		break;
+
+	case SAR_FIRST:
+		if (object->buf.len) {
+			BT_WARN("First PDU while a pending incomplete one");
+			return -EINVAL;
+		}
+
+		k_delayed_work_submit(&object->sar_timer, PROXY_SAR_TIMEOUT);
+		object->msg_type = PDU_TYPE(data);
+		net_buf_simple_add_mem(&object->buf, data + 1, len - 1);
+		break;
+
+	case SAR_CONT:
+		if (!object->buf.len) {
+			BT_WARN("Continuation with no prior data");
+			return -EINVAL;
+		}
+
+		if (object->msg_type != PDU_TYPE(data)) {
+			BT_WARN("Unexpected message type in continuation");
+			return -EINVAL;
+		}
+
+		k_delayed_work_submit(&object->sar_timer, PROXY_SAR_TIMEOUT);
+		net_buf_simple_add_mem(&object->buf, data + 1, len - 1);
+		break;
+
+	case SAR_LAST:
+		if (!object->buf.len) {
+			BT_WARN("Last SAR PDU with no prior data");
+			return -EINVAL;
+		}
+
+		if (object->msg_type != PDU_TYPE(data)) {
+			BT_WARN("Unexpected message type in last SAR PDU");
+			return -EINVAL;
+		}
+
+		k_delayed_work_cancel(&object->sar_timer);
+		net_buf_simple_add_mem(&object->buf, data + 1, len - 1);
+		proxy_complete_pdu(object);
+		break;
+	}
+
+	return len;
+}
+
 static uint8_t proxy_notify_func(struct bt_conn *conn,
 				 struct bt_gatt_subscribe_params *params,
 				 const void *data, uint16_t length)
@@ -293,7 +582,7 @@ static uint8_t proxy_notify_func(struct bt_conn *conn,
 		return BT_GATT_ITER_STOP;
 	}
 
-	// TODO: Send to receive function
+	bt_mesh_proxy_cli_recv(&server->object, data, length);
 
 	return BT_GATT_ITER_CONTINUE;
 }
@@ -389,7 +678,7 @@ static uint8_t proxy_discover_func(struct bt_conn *conn,
 					   BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 		} else {
 			BT_DBG("[SUBSCRIBED]");
-			// TODO: Set filtertype of server
+			filter_type_set(server, true);
 		}
 
 		return BT_GATT_ITER_STOP;
@@ -513,7 +802,7 @@ static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 	// TODO: Make connection through net_id configurable
 	int err;
 
-	BT_DBG("Incoming net adv");
+	// BT_DBG("Incoming net adv beacon");
 	if(bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr)){
 		BT_DBG("Allready found address");
 		return;
