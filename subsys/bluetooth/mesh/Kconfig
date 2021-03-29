@@ -98,6 +98,10 @@ config BT_MESH_PROXY
 	bool
 	select BT_GATT_DYNAMIC_DB
 
+config BT_MESH_PROXY_CLIENT
+	bool "Proxy Client support"
+	select BT_MESH_PROXY
+
 config BT_MESH_PB_GATT
 	bool "Provisioning support using GATT (PB-GATT)"
 	select BT_MESH_PROXY
@@ -805,6 +809,12 @@ config BT_MESH_DEBUG_PROXY
 	depends on BT_MESH_PROXY
 	help
 	  Use this option to enable Proxy protocol debug logs.
+
+config BT_MESH_DEBUG_PROXY_CLIENT
+	bool "Proxy client debug"
+	depends on BT_MESH_PROXY_CLIENT
+	help
+	  Use this option to enable Proxy client protocol debug logs.
 
 config BT_MESH_DEBUG_SETTINGS
 	bool "Persistent settings debug"
