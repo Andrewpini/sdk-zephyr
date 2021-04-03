@@ -50,6 +50,11 @@ struct proxy_beacon {
 	};
 };
 
+struct node_id_lookup {
+	uint8_t addr;
+	uint8_t net_idx;
+};
+
 /** Proxy Client Callbacks. */
 struct bt_mesh_proxy {
 	/** @brief Proxy Network Identity Beacon has been received.
@@ -98,6 +103,8 @@ struct bt_mesh_proxy {
 
 void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 				  struct net_buf_simple *buf);
+
+void bt_mesh_proxy_cli_node_id_ctx_set(struct node_id_lookup *ctx);
 
 int bt_mesh_proxy_client_init(void);
 

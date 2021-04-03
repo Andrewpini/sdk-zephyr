@@ -206,6 +206,38 @@ failed:
 	return false;
 }
 
+static struct node_id_lookup node_id_lkp = {
+	.addr = 0,
+	.net_idx = 0
+ };
+
+static bool is_node_id_match(const uint8_t *hash, const uint8_t *random)
+{
+	int err;
+	uint8_t tmp[16];
+	struct bt_mesh_subnet *sub;
+
+	(void)memset(tmp, 0, 6);
+	memcpy(tmp + 6, random, 8);
+	sys_put_be16(node_id_lkp.addr, &tmp[14]);
+
+	sub = bt_mesh_subnet_get(node_id_lkp.net_idx);
+	if (sub == NULL) {
+		return false;
+	}
+
+	err = bt_encrypt_be(sub->keys[SUBNET_KEY_TX_IDX(sub)].identity, tmp, tmp);
+	if (err) {
+		return false;
+	}
+
+	if (!memcmp(hash, tmp + 8, 8)) {
+		return true;
+	}
+
+	return false;
+}
+
 void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 				  struct net_buf_simple *buf)
 {
@@ -221,6 +253,7 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 	switch (beacon.beacon_type) {
 	case NET:
 		if (proxy_cb && proxy_cb->network_id) {
+			// BT_DBG("Incoming Net Id beacon");
 			sub = bt_mesh_subnet_get(listen_netidx);
 
 			if (!sub) {
@@ -238,7 +271,19 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 		}
 		break;
 	case NODE:
-		BT_DBG("Incoming Node Id beacon");
+		// BT_DBG("Incoming Node Id beacon");
+		if(node_id_lkp.addr == 0)
+		{
+			return;
+		}
+
+		if (proxy_cb && proxy_cb->node_id) {
+			if (is_node_id_match(beacon.node.hash, beacon.node.random))
+			{
+				proxy_cb->node_id(addr, node_id_lkp.net_idx,
+						  node_id_lkp.addr);
+			}
+		}
 		break;
 	default:
 		break;
@@ -814,6 +859,7 @@ static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 
 	if (err)
 	{
+		BT_ERR("Failed to connect");
 		bt_mesh_scan_enable();
 	}
 
@@ -823,13 +869,38 @@ static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 static void node_id_cb(const bt_addr_le_t *addr, uint16_t net_idx,
 		  uint16_t node_addr)
 {
+	int err;
+
+	if(bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr)){
+		BT_DBG("Allready found address");
+		return;
+	}
+
+	bt_mesh_scan_disable();
+
+	err = bt_mesh_proxy_connect(addr, net_idx);
+
+	if (err)
+	{
+		BT_ERR("Failed to connect");
+		bt_mesh_scan_enable();
+	}
+	node_id_lkp.addr = 0;
+	node_id_lkp.net_idx = 0;
 }
 
 static struct bt_mesh_proxy proxy_cb_func = {
-	.network_id = network_id_cb,
+
+	// TODO: Commented out for now
+	// .network_id = network_id_cb,
 	.node_id = node_id_cb,
 };
 
+void bt_mesh_proxy_cli_node_id_ctx_set(struct node_id_lookup *ctx)
+{
+	node_id_lkp.addr = ctx->addr;
+	node_id_lkp.net_idx = ctx->net_idx;
+}
 int bt_mesh_proxy_client_init(void)
 {
 	int i;
