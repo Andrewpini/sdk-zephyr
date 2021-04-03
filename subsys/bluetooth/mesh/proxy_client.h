@@ -88,7 +88,7 @@ struct bt_mesh_proxy {
 	 *  @param conn New connection object.
 	 *  @param err  Zero for success, non-zero otherwise.
 	 */
-	void (*connected)(struct bt_conn *conn, uint8_t reason);
+	void (*connected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx, uint8_t reason);
 
 	/** @brief A proxy connection has been disconnected.
 	 *
@@ -98,8 +98,15 @@ struct bt_mesh_proxy {
 	 *  @param conn Connection object.
 	 *  @param reason reason for the disconnection.
 	 */
-	void (*disconnected)(struct bt_conn *conn, uint8_t reason);
+	void (*disconnected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx, uint8_t reason);
 };
+
+void bt_mesh_proxy_cli_conn_cb_set(void (*connected)(struct bt_conn *conn,
+						     struct node_id_lookup *addr_ctx,
+						     uint8_t reason),
+				   void (*disconnected)(struct bt_conn *conn,
+							struct node_id_lookup *addr_ctx,
+							uint8_t reason));
 
 void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 				  struct net_buf_simple *buf);

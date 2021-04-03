@@ -61,6 +61,7 @@ static struct bt_mesh_proxy_server {
 	} type;
 
 	uint16_t net_idx;
+	uint16_t addr;
 	uint16_t cmd_handle;
 	struct bt_uuid_16 uuid;
 	struct bt_gatt_discover_params discover_params;
@@ -68,6 +69,7 @@ static struct bt_mesh_proxy_server {
 } servers[CONFIG_BT_MAX_CONN] = {
 	[0 ... (CONFIG_BT_MAX_CONN - 1)] = {
 		.net_idx = BT_MESH_KEY_UNUSED,
+		.addr = 0,
 		.object.cb = {
 			.send_cb = proxy_send,
 		}
@@ -290,7 +292,7 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 	}
 }
 
-int bt_mesh_proxy_connect(const bt_addr_le_t *addr, uint16_t net_idx)
+int bt_mesh_proxy_connect(const bt_addr_le_t *addr, uint16_t mesh_addr, uint16_t net_idx)
 {
 	int err;
 	struct bt_le_conn_param *param;
@@ -303,6 +305,7 @@ int bt_mesh_proxy_connect(const bt_addr_le_t *addr, uint16_t net_idx)
 
 	server->net_idx = net_idx;
 	server->type = SR_NETWORK;
+	server->addr = mesh_addr;
 
 	param = BT_LE_CONN_PARAM_DEFAULT;
 	err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN,
@@ -750,6 +753,11 @@ static void proxy_connected(struct bt_conn *conn, uint8_t conn_err)
 	server = find_server(conn);
 	net_buf_simple_reset(&server->object.buf);
 
+	struct node_id_lookup addr_ctx = {
+		.addr = server->addr,
+		.net_idx = server->net_idx
+	};
+
 	if (conn_err) {
 		BT_ERR("Failed to connect (%u)", conn_err);
 		if (server) {
@@ -758,7 +766,8 @@ static void proxy_connected(struct bt_conn *conn, uint8_t conn_err)
 		}
 
 		if (proxy_cb && proxy_cb->connected) {
-			proxy_cb->connected(conn, conn_err);
+
+			proxy_cb->connected(conn, &addr_ctx, conn_err);
 		}
 
 		return;
@@ -774,7 +783,7 @@ static void proxy_connected(struct bt_conn *conn, uint8_t conn_err)
 	int test_err = bt_mesh_scan_enable();
 	BT_DBG("bt_mesh_scan_enable: %d", test_err);
 	if (proxy_cb && proxy_cb->connected) {
-		proxy_cb->connected(conn, 0);
+		proxy_cb->connected(conn, &addr_ctx, 0);
 	}
 
 	if (server->type == SR_NETWORK) {
@@ -818,12 +827,17 @@ static void proxy_disconnected(struct bt_conn *conn, uint8_t reason)
 	}
 
 	if (proxy_cb && proxy_cb->disconnected) {
-		proxy_cb->disconnected(conn, reason);
+		struct node_id_lookup addr_ctx = {
+			.addr = server->addr,
+			.net_idx = server->net_idx
+		};
+		proxy_cb->disconnected(conn, &addr_ctx, reason);
 	}
 
 	server->type = SR_NONE;
 	server->cmd_handle = 0U;
 	server->net_idx = BT_MESH_KEY_UNUSED;
+	server->addr = 0;
 	bt_conn_unref(server->object.conn);
 	server->object.conn = NULL;
 	k_delayed_work_cancel(&server->object.sar_timer);
@@ -855,7 +869,7 @@ static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 
 	BT_DBG("network_id_cb: net_idx: %d", net_idx);
 	bt_mesh_scan_disable();
-	err = bt_mesh_proxy_connect(addr, net_idx);
+	err = bt_mesh_proxy_connect(addr, 0, net_idx);
 
 	if (err)
 	{
@@ -878,7 +892,7 @@ static void node_id_cb(const bt_addr_le_t *addr, uint16_t net_idx,
 
 	bt_mesh_scan_disable();
 
-	err = bt_mesh_proxy_connect(addr, net_idx);
+	err = bt_mesh_proxy_connect(addr, node_addr, net_idx);
 
 	if (err)
 	{
@@ -901,6 +915,18 @@ void bt_mesh_proxy_cli_node_id_ctx_set(struct node_id_lookup *ctx)
 	node_id_lkp.addr = ctx->addr;
 	node_id_lkp.net_idx = ctx->net_idx;
 }
+
+void bt_mesh_proxy_cli_conn_cb_set(void (*connected)(struct bt_conn *conn,
+						     struct node_id_lookup *addr_ctx,
+						     uint8_t reason),
+				   void (*disconnected)(struct bt_conn *conn,
+							struct node_id_lookup *addr_ctx,
+							uint8_t reason))
+{
+	proxy_cb_func.connected = connected;
+	proxy_cb_func.disconnected = disconnected;
+}
+
 int bt_mesh_proxy_client_init(void)
 {
 	int i;
