@@ -59,7 +59,7 @@ static struct bt_mesh_proxy_server {
 		SR_PROV,
 		SR_NETWORK,
 	} type;
-
+	bool configured;
 	uint16_t net_idx;
 	uint16_t addr;
 	uint16_t cmd_handle;
@@ -727,6 +727,16 @@ static uint8_t proxy_discover_func(struct bt_conn *conn,
 		} else {
 			BT_DBG("[SUBSCRIBED]");
 			filter_type_set(server, true);
+			server->configured = true;
+
+			if (proxy_cb && proxy_cb->configured) {
+				struct node_id_lookup addr_ctx = {
+					.addr = server->addr,
+					.net_idx = server->net_idx
+				};
+				proxy_cb->configured(conn, &addr_ctx);
+			}
+
 		}
 
 		return BT_GATT_ITER_STOP;
@@ -826,24 +836,25 @@ static void proxy_disconnected(struct bt_conn *conn, uint8_t reason)
 		return;
 	}
 
-	if (proxy_cb && proxy_cb->disconnected) {
-		struct node_id_lookup addr_ctx = {
-			.addr = server->addr,
-			.net_idx = server->net_idx
-		};
-		proxy_cb->disconnected(conn, &addr_ctx, reason);
-	}
+	struct node_id_lookup addr_ctx = {
+		.addr = server->addr,
+		.net_idx = server->net_idx
+	};
 
 	server->type = SR_NONE;
 	server->cmd_handle = 0U;
 	server->net_idx = BT_MESH_KEY_UNUSED;
 	server->addr = 0;
+	server->configured = false;
 	bt_conn_unref(server->object.conn);
 	server->object.conn = NULL;
 	k_delayed_work_cancel(&server->object.sar_timer);
 
 	BT_DBG("Disconnected (reason 0x%02x)", reason);
 
+	if (proxy_cb && proxy_cb->disconnected) {
+		proxy_cb->disconnected(conn, &addr_ctx, reason);
+	}
 }
 
 void bt_mesh_proxy_client_set_cb(struct bt_mesh_proxy *cb)
@@ -916,14 +927,16 @@ void bt_mesh_proxy_cli_node_id_ctx_set(struct node_id_lookup *ctx)
 	node_id_lkp.net_idx = ctx->net_idx;
 }
 
-void bt_mesh_proxy_cli_conn_cb_set(void (*connected)(struct bt_conn *conn,
-						     struct node_id_lookup *addr_ctx,
-						     uint8_t reason),
-				   void (*disconnected)(struct bt_conn *conn,
-							struct node_id_lookup *addr_ctx,
-							uint8_t reason))
+void bt_mesh_proxy_cli_conn_cb_set(
+	void (*connected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx,
+			  uint8_t reason),
+	void (*configured)(struct bt_conn *conn,
+			   struct node_id_lookup *addr_ctx),
+	void (*disconnected)(struct bt_conn *conn,
+			     struct node_id_lookup *addr_ctx, uint8_t reason))
 {
 	proxy_cb_func.connected = connected;
+	proxy_cb_func.configured = configured;
 	proxy_cb_func.disconnected = disconnected;
 }
 

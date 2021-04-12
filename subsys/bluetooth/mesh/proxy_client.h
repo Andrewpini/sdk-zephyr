@@ -90,6 +90,17 @@ struct bt_mesh_proxy {
 	 */
 	void (*connected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx, uint8_t reason);
 
+	/** @brief A new proxy connection has been configured.
+	 *
+	 *  This callback notifies the application of a new connection.
+	 *  In case the err parameter is non-zero it means that the
+	 *  connection establishment failed.
+	 *
+	 *  @param conn New connection object.
+	 *  @param err  Zero for success, non-zero otherwise.
+	 */
+	void (*configured)(struct bt_conn *conn, struct node_id_lookup *addr_ctx);
+
 	/** @brief A proxy connection has been disconnected.
 	 *
 	 *  This callback notifies the application that a proxy connection
@@ -98,15 +109,16 @@ struct bt_mesh_proxy {
 	 *  @param conn Connection object.
 	 *  @param reason reason for the disconnection.
 	 */
-	void (*disconnected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx, uint8_t reason);
+	void (*disconnected)(struct bt_conn *conn,
+			     struct node_id_lookup *addr_ctx, uint8_t reason);
 };
 
-void bt_mesh_proxy_cli_conn_cb_set(void (*connected)(struct bt_conn *conn,
-						     struct node_id_lookup *addr_ctx,
-						     uint8_t reason),
-				   void (*disconnected)(struct bt_conn *conn,
-							struct node_id_lookup *addr_ctx,
-							uint8_t reason));
+void bt_mesh_proxy_cli_conn_cb_set(
+	void (*connected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx,
+			  uint8_t reason),
+	void (*configured)(struct bt_conn *conn, struct node_id_lookup *addr_ctx),
+	void (*disconnected)(struct bt_conn *conn,
+			     struct node_id_lookup *addr_ctx, uint8_t reason));
 
 void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 				  struct net_buf_simple *buf);
