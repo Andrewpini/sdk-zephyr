@@ -76,9 +76,18 @@ static struct bt_mesh_proxy_server {
 	}
 };
 
+static struct bt_mesh_proxy_net_id_ctx {
+
+	bool active;
+	uint16_t net_idx;
+
+} net_id_serach_ctx = {
+	.active = false,
+	.net_idx = 0,
+};
+
 static struct bt_mesh_proxy *proxy_cb;
 static uint8_t __noinit server_buf_data[SERVER_BUF_SIZE * CONFIG_BT_MAX_CONN];
-static uint16_t listen_netidx = 0; // TODO: Change from static
 static struct bt_gatt_exchange_params exchange_params;
 
 // ------------- Functions -------------
@@ -166,33 +175,29 @@ static bool beacon_process(struct bt_data *data, void *user_data)
 			beacon->prov.oob = &data->data[18];
 			return true;
 		} else if (beacon->beacon_type == NET) {
-			if (data->data_len == 11U) {
-				bt_uuid_create(&uuid, data->data, 2);
-				if (bt_uuid_cmp(&uuid, BT_UUID_MESH_PROXY)) {
-					goto failed;
-				}
+			if ((data->data_len != 11U) &&
+			    (data->data_len != 19U)) {
+				goto failed;
+			}
 
-				if (data->data[2] != 0x00) {
-					goto failed;
-				}
+			bt_uuid_create(&uuid, data->data, 2);
+			if (bt_uuid_cmp(&uuid, BT_UUID_MESH_PROXY)) {
+				goto failed;
+			}
 
+			switch (data->data[2])
+			{
+			case 0:
 				beacon->beacon_type = NET;
 				beacon->net.id = &data->data[3];
 				return true;
-			} else if (data->data_len == 19U) {
-				bt_uuid_create(&uuid, data->data, 2);
-				if (bt_uuid_cmp(&uuid, BT_UUID_MESH_PROXY)) {
-					goto failed;
-				}
-
-				if (data->data[2] != 0x01) {
-					goto failed;
-				}
-
+			case 1:
 				beacon->beacon_type = NODE;
 				beacon->node.hash = &data->data[3];
 				beacon->node.random = &data->data[11];
 				return true;
+			default:
+				goto failed;
 			}
 		}
 		__fallthrough;
@@ -254,9 +259,9 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 
 	switch (beacon.beacon_type) {
 	case NET:
-		if (proxy_cb && proxy_cb->network_id) {
+		if (proxy_cb && proxy_cb->network_id && net_id_serach_ctx.active) {
 			// BT_DBG("Incoming Net Id beacon");
-			sub = bt_mesh_subnet_get(listen_netidx);
+			sub = bt_mesh_subnet_get(net_id_serach_ctx.net_idx);
 
 			if (!sub) {
 				break;
@@ -880,7 +885,9 @@ static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 
 	BT_DBG("network_id_cb: net_idx: %d", net_idx);
 	bt_mesh_scan_disable();
-	err = bt_mesh_proxy_connect(addr, 0, net_idx);
+	err = bt_mesh_proxy_connect(addr, BT_MESH_ADDR_UNASSIGNED, net_idx);
+	net_id_serach_ctx.active = false;
+
 
 	if (err)
 	{
@@ -917,16 +924,22 @@ static void node_id_cb(const bt_addr_le_t *addr, uint16_t net_idx,
 static struct bt_mesh_proxy proxy_cb_func = {
 
 	// TODO: Commented out for now
-	// .network_id = network_id_cb,
+	.network_id = network_id_cb,
 	.node_id = node_id_cb,
 };
 
-void bt_mesh_proxy_cli_node_id_ctx_set(struct node_id_lookup *ctx)
+void bt_mesh_proxy_cli_node_id_connect(struct node_id_lookup *ctx)
 {
 	node_id_lkp.addr = ctx->addr;
 	node_id_lkp.net_idx = ctx->net_idx;
 }
 
+void bt_mesh_proxy_cli_net_id_connect(uint16_t net_idx)
+{
+	net_id_serach_ctx.net_idx = net_idx;
+	net_id_serach_ctx.active = true;
+	BT_INFO("Network ID scanning activated for net idx: %d", net_idx);
+}
 void bt_mesh_proxy_cli_conn_cb_set(
 	void (*connected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx,
 			  uint8_t reason),

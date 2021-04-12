@@ -123,7 +123,9 @@ void bt_mesh_proxy_cli_conn_cb_set(
 void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 				  struct net_buf_simple *buf);
 
-void bt_mesh_proxy_cli_node_id_ctx_set(struct node_id_lookup *ctx);
+void bt_mesh_proxy_cli_node_id_connect(struct node_id_lookup *ctx);
+
+void bt_mesh_proxy_cli_net_id_connect(uint16_t net_idx);
 
 int bt_mesh_proxy_client_init(void);
 
