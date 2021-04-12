@@ -89,6 +89,7 @@ static struct bt_mesh_proxy_net_id_ctx {
 static struct bt_mesh_proxy *proxy_cb;
 static uint8_t __noinit server_buf_data[SERVER_BUF_SIZE * CONFIG_BT_MAX_CONN];
 static struct bt_gatt_exchange_params exchange_params;
+static bool adv_relay_enabled = true;
 
 // ------------- Functions -------------
 
@@ -513,9 +514,9 @@ static void proxy_cfg(struct bt_mesh_proxy_object *object)
 		return;
 	}
 
-	// if (object->cb.recv_cb) {
-	// 	object->cb.recv_cb(object->conn, &rx, &buf);
-	// }
+	if (object->cb.recv_cb) {
+		object->cb.recv_cb(object->conn, &rx, &buf);
+	}
 }
 
 static void proxy_complete_pdu(struct bt_mesh_proxy_object *object)
@@ -961,12 +962,24 @@ void bt_mesh_proxy_cli_node_id_connect(struct node_id_lookup *ctx)
 	node_id_lkp.net_idx = ctx->net_idx;
 }
 
+void bt_mesh_proxy_cli_adv_relay_set(bool onoff)
+{
+	adv_relay_enabled = onoff;
+	BT_INFO("Advertising Relay is %s", onoff ? "Enabled" : "Disabled");
+}
+
 void bt_mesh_proxy_cli_net_id_connect(uint16_t net_idx)
 {
 	net_id_serach_ctx.net_idx = net_idx;
 	net_id_serach_ctx.active = true;
 	BT_INFO("Network ID scanning activated for net idx: %d", net_idx);
 }
+
+bool bt_mesh_proxy_cli_is_adv_relay_enabled(void)
+{
+	return adv_relay_enabled;
+}
+
 void bt_mesh_proxy_cli_conn_cb_set(
 	void (*connected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx,
 			  uint8_t reason),

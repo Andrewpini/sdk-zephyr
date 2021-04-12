@@ -113,6 +113,10 @@ struct bt_mesh_proxy {
 			     struct node_id_lookup *addr_ctx, uint8_t reason);
 };
 
+void bt_mesh_proxy_cli_adv_relay_set(bool onoff);
+
+bool bt_mesh_proxy_cli_is_adv_relay_enabled(void);
+
 void bt_mesh_proxy_cli_conn_cb_set(
 	void (*connected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx,
 			  uint8_t reason),
