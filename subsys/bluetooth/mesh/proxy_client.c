@@ -928,6 +928,33 @@ static struct bt_mesh_proxy proxy_cb_func = {
 	.node_id = node_id_cb,
 };
 
+bool bt_mesh_proxy_cli_relay(struct net_buf_simple *buf, uint16_t dst)
+{
+	bool relayed = false;
+
+	BT_DBG("");
+	BT_DBG("bt_mesh_proxy_relay CLI %u bytes to dst 0x%04x", buf->len, dst);
+
+	for (int i = 0; i < ARRAY_SIZE(servers); i++) {
+		if (!servers[i].object.conn || !servers[i].configured) {
+			continue;
+		}
+
+		NET_BUF_SIMPLE_DEFINE(msg, 32);
+
+		/* Proxy PDU sending modifies the original buffer,
+		 * so we need to make a copy.
+		 */
+		net_buf_simple_reserve(&msg, 1);
+		net_buf_simple_add_mem(&msg, buf->data, buf->len);
+
+		bt_mesh_proxy_send(servers[i].object.conn, BT_MESH_PROXY_NET_PDU, &msg);
+		relayed = true;
+	}
+
+	return relayed;
+}
+
 void bt_mesh_proxy_cli_node_id_connect(struct node_id_lookup *ctx)
 {
 	node_id_lkp.addr = ctx->addr;
