@@ -540,8 +540,18 @@ int bt_mesh_net_send(struct bt_mesh_net_tx *tx, struct net_buf *buf,
 		err = 0;
 		goto done;
 	}
-
+	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
+	if (bt_mesh_proxy_cli_is_adv_relay_enabled())
+	{
+		bt_mesh_adv_send(buf, cb, cb_data);
+	}
+	#else
 	bt_mesh_adv_send(buf, cb, cb_data);
+	#endif
+
+	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
+	bt_mesh_proxy_cli_relay(&buf->b, tx->ctx->addr);
+	#endif
 
 done:
 	net_buf_unref(buf);
@@ -605,7 +615,8 @@ static bool net_decrypt(struct bt_mesh_net_rx *rx, struct net_buf_simple *in,
 		return false;
 	}
 
-	if (rx->net_if == BT_MESH_NET_IF_ADV && msg_cache_match(out)) {
+	if ((rx->net_if == BT_MESH_NET_IF_ADV && msg_cache_match(out)) ||
+	    (rx->net_if == BT_MESH_NET_IF_PROXY && msg_cache_match(out))) {
 		BT_DBG("Duplicate found in Network Message Cache");
 		return false;
 	}
@@ -705,8 +716,20 @@ static void bt_mesh_net_relay(struct net_buf_simple *sbuf,
 		bt_mesh_proxy_relay(&buf->b, rx->ctx.recv_dst);
 	}
 
+	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
+	bt_mesh_proxy_cli_relay(&buf->b, rx->ctx.recv_dst);
+	#endif
+
 	if (relay_to_adv(rx->net_if) || rx->friend_cred) {
-		bt_mesh_adv_send(buf, NULL, NULL);
+		#ifdef CONFIG_BT_MESH_PROXY_CLIENT
+		if (bt_mesh_proxy_cli_is_adv_relay_enabled())
+		{
+			bt_mesh_adv_send(buf, NULL, NULL);
+		}
+		#else
+			bt_mesh_adv_send(buf, NULL, NULL);
+		#endif
+
 	}
 
 done:
