@@ -17,6 +17,7 @@
 #define LOG_COLOR_CODE_DEFAULT "\x1B[0m"
 #define LOG_COLOR_CODE_RED     "\x1B[1;31m"
 #define LOG_COLOR_CODE_YELLOW  "\x1B[1;33m"
+#define LOG_COLOR_CODE_MAGENTA  "\x1B[1;35m"
 
 #define HEXDUMP_BYTES_IN_LINE 16
 
@@ -38,7 +39,7 @@ static const char *const colors[] = {
 	NULL,
 	LOG_COLOR_CODE_RED,     /* err */
 	LOG_COLOR_CODE_YELLOW,  /* warn */
-	NULL,                   /* info */
+	LOG_COLOR_CODE_MAGENTA,                   /* info */
 	NULL                    /* dbg */
 };
 
