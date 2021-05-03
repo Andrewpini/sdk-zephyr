@@ -31,6 +31,7 @@
 #include "lpn.h"
 #include "friend.h"
 #include "proxy.h"
+#include "proxy_client.h"
 #include "transport.h"
 #include "access.h"
 #include "foundation.h"
@@ -493,8 +494,14 @@ int bt_mesh_net_send(struct bt_mesh_net_tx *tx, struct net_buf *buf,
 	BT_DBG("Payload len %u: %s", buf->len, bt_hex(buf->data, buf->len));
 	BT_DBG("Seq 0x%06x", bt_mesh.seq);
 
+	// struct net_buf *alt_buf =
+	// 	bt_mesh_adv_create(BT_MESH_ADV_DATA, tx->xmit, K_NO_WAIT);
+	// net_buf_reserve(alt_buf, BT_MESH_NET_HDR_LEN);
+	// net_buf_add_mem(alt_buf, buf->b.data, buf->b.len);
+
 	cred = net_tx_cred_get(tx);
 	err = net_header_encode(tx, cred->nid, &buf->b);
+	// printk("Original: %s\n", bt_hex(buf->b.data, buf->b.len));
 	if (err) {
 		goto done;
 	}
@@ -536,25 +543,48 @@ int bt_mesh_net_send(struct bt_mesh_net_tx *tx, struct net_buf *buf,
 	    BT_MESH_ADDR_IS_UNICAST(tx->ctx->addr)) {
 		/* Notify completion if this only went through the Mesh Proxy */
 		send_cb_finalize(cb, cb_data);
-
 		err = 0;
-		goto done;
+		// TODO: Remove?
+		// goto done;
 	}
+
 	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
-	if (bt_mesh_proxy_cli_is_adv_relay_enabled())
-	{
-		bt_mesh_adv_send(buf, cb, cb_data);
-	}
+	bt_mesh_proxy_cli_relay(&buf->b, tx->ctx->addr);
+	switch (bt_mesh_proxy_cli_adv_state_get())
+		{
+		case BT_MESH_PROXY_CLI_ADV_REDUCED:
+			// printk("BT_MESH_PROXY_CLI_ADV_REDUCED\n");
+			// cred = net_tx_cred_get(tx);
+			// err = net_header_encode(tx, cred->nid, &alt_buf->b);
+			// /* Leave CTL bit intact */
+			// alt_buf->b.data[1] &= 0x80;
+			// alt_buf->b.data[1] |= 0;
+
+			// printk("Duplicate: %s\n", bt_hex(alt_buf->b.data, alt_buf->b.len));
+			// err = net_encrypt(&alt_buf->b, cred, BT_MESH_NET_IVI_TX, false);
+			// if (err) {
+			// 	printk("Fail?\n");
+			// 	goto done;
+			// }
+			bt_mesh_adv_send(buf, cb, cb_data);
+			// TODO: Finn ut hvordan dette skal bli
+			// bt_mesh_adv_send(alt_buf, cb, cb_data);
+			break;
+		case BT_MESH_PROXY_CLI_ADV_DISABLED:
+			printk("BT_MESH_PROXY_CLI_ADV_DISABLED\n");
+			break;
+		default:
+			printk("BT_MESH_PROXY_CLI_ADV_ENABLED\n");
+			bt_mesh_adv_send(buf, cb, cb_data);
+			break;
+		}
 	#else
 	bt_mesh_adv_send(buf, cb, cb_data);
 	#endif
 
-	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
-	bt_mesh_proxy_cli_relay(&buf->b, tx->ctx->addr);
-	#endif
-
 done:
 	net_buf_unref(buf);
+	// net_buf_unref(alt_buf);
 	return err;
 }
 
@@ -722,14 +752,57 @@ static void bt_mesh_net_relay(struct net_buf_simple *sbuf,
 
 	if (relay_to_adv(rx->net_if) || rx->friend_cred) {
 		#ifdef CONFIG_BT_MESH_PROXY_CLIENT
-		if (bt_mesh_proxy_cli_is_adv_relay_enabled())
-		{
+
+		switch (bt_mesh_proxy_cli_adv_state_get()) {
+		case BT_MESH_PROXY_CLI_ADV_REDUCED:
+			printk("BT_MESH_PROXY_CLI_ADV_REDUCED\n");
+			struct net_buf *alt_buf;
+			alt_buf = bt_mesh_adv_create(BT_MESH_ADV_DATA, transmit, K_NO_WAIT);
+			if (!alt_buf) {
+				BT_ERR("Out of relay buffers");
+				return;
+			}
+
+			/* Leave CTL bit intact */
+			sbuf->data[1] &= 0x80;
+			sbuf->data[1] |= 0;
+
+			net_buf_add_mem(alt_buf, sbuf->data, sbuf->len);
+
+			cred = &rx->sub->keys[SUBNET_KEY_TX_IDX(rx->sub)].msg;
+
+			BT_DBG("Relaying packet. TTL is now %u", TTL(alt_buf->data));
+
+			/* Update NID if RX or RX was with friend credentials */
+			if (rx->friend_cred) {
+				alt_buf->data[0] &= 0x80; /* Clear everything except IVI */
+				alt_buf->data[0] |= cred->nid;
+			}
+
+			/* We re-encrypt and obfuscate using the received IVI rather than
+			* the normal TX IVI (which may be different) since the transport
+			* layer nonce includes the IVI.
+			*/
+			if (net_encrypt(&alt_buf->b, cred, BT_MESH_NET_IVI_RX(rx), false)) {
+				BT_ERR("Re-encrypting failed");
+				goto done;
+			}
+			printk("Relayed message from REDUCED\n");
+			bt_mesh_adv_send(alt_buf, NULL, NULL);
+			net_buf_unref(alt_buf);
+			break;
+		case BT_MESH_PROXY_CLI_ADV_DISABLED:
+			printk("BT_MESH_PROXY_CLI_ADV_DISABLED\n");
+			/* code */
+			break;
+		default:
+			printk("BT_MESH_PROXY_CLI_ADV_ENABLED\n");
 			bt_mesh_adv_send(buf, NULL, NULL);
+			break;
 		}
 		#else
 			bt_mesh_adv_send(buf, NULL, NULL);
 		#endif
-
 	}
 
 done:

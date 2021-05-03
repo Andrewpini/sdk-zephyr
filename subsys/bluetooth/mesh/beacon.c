@@ -22,6 +22,7 @@
 #include "adv.h"
 #include "mesh.h"
 #include "net.h"
+#include "proxy_client.h"
 #include "prov.h"
 #include "crypto.h"
 #include "beacon.h"
@@ -113,8 +114,26 @@ static int secure_beacon_send(struct bt_mesh_subnet *sub, void *cb_data)
 	}
 
 	bt_mesh_beacon_create(sub, &buf->b);
+	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
+	bt_mesh_proxy_cli_relay(&buf->b, 0);
+	switch (bt_mesh_proxy_cli_adv_state_get())
+		{
+		case BT_MESH_PROXY_CLI_ADV_REDUCED:
 
+			bt_mesh_adv_send(buf, &send_cb, sub);
+			break;
+		case BT_MESH_PROXY_CLI_ADV_DISABLED:
+			printk("BT_MESH_PROXY_CLI_ADV_DISABLED\n");
+			break;
+		default:
+			printk("BT_MESH_PROXY_CLI_ADV_ENABLED\n");
+			bt_mesh_adv_send(buf, &send_cb, sub);
+			break;
+		}
+	#else
 	bt_mesh_adv_send(buf, &send_cb, sub);
+	#endif
+	// bt_mesh_adv_send(buf, &send_cb, sub);
 	net_buf_unref(buf);
 
 	return 0;
@@ -149,7 +168,27 @@ static int unprovisioned_beacon_send(void)
 	net_buf_add_be16(buf, oob_info);
 	net_buf_add_mem(buf, uri_hash, 4);
 
+	// bt_mesh_adv_send(buf, NULL, NULL);
+	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
+	bt_mesh_proxy_cli_relay(&buf->b, 0);
+	switch (bt_mesh_proxy_cli_adv_state_get())
+		{
+		case BT_MESH_PROXY_CLI_ADV_REDUCED:
+
+			bt_mesh_adv_send(buf, NULL, NULL);
+			break;
+		case BT_MESH_PROXY_CLI_ADV_DISABLED:
+			printk("BT_MESH_PROXY_CLI_ADV_DISABLED\n");
+			break;
+		default:
+			printk("BT_MESH_PROXY_CLI_ADV_ENABLED\n");
+			bt_mesh_adv_send(buf, NULL, NULL);
+			break;
+		}
+	#else
 	bt_mesh_adv_send(buf, NULL, NULL);
+	#endif
+
 	net_buf_unref(buf);
 
 	if (prov->uri) {
@@ -167,7 +206,26 @@ static int unprovisioned_beacon_send(void)
 			BT_WARN("Too long URI to fit advertising data");
 		} else {
 			net_buf_add_mem(buf, prov->uri, len);
+			#ifdef CONFIG_BT_MESH_PROXY_CLIENT
+			bt_mesh_proxy_cli_relay(&buf->b, 0);
+			switch (bt_mesh_proxy_cli_adv_state_get())
+				{
+				case BT_MESH_PROXY_CLI_ADV_REDUCED:
+
+					bt_mesh_adv_send(buf, NULL, NULL);
+					break;
+				case BT_MESH_PROXY_CLI_ADV_DISABLED:
+					printk("BT_MESH_PROXY_CLI_ADV_DISABLED\n");
+					break;
+				default:
+					printk("BT_MESH_PROXY_CLI_ADV_ENABLED\n");
+					bt_mesh_adv_send(buf, NULL, NULL);
+					break;
+				}
+			#else
 			bt_mesh_adv_send(buf, NULL, NULL);
+			#endif
+			// bt_mesh_adv_send(buf, NULL, NULL);
 		}
 
 		net_buf_unref(buf);
