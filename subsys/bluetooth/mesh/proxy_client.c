@@ -132,7 +132,7 @@ static bool beacon_process(struct bt_data *data, void *user_data)
 	struct bt_uuid uuid;
 	struct proxy_beacon *beacon = user_data;
 
-	// BT_DBG("[AD]: %u data_len %u", data->type, data->data_len);
+	BT_DBG("[AD]: %u data_len %u", data->type, data->data_len);
 
 	switch (data->type) {
 	case BT_DATA_FLAGS:
@@ -262,7 +262,7 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 	switch (beacon.beacon_type) {
 	case NET:
 		if (proxy_cb && proxy_cb->network_id && net_id_serach_ctx.active) {
-			// BT_DBG("Incoming Net Id beacon");
+			BT_DBG("Incoming Net Id beacon");
 			sub = bt_mesh_subnet_get(net_id_serach_ctx.net_idx);
 
 			if (!sub) {
@@ -280,7 +280,7 @@ void bt_mesh_proxy_client_process(const bt_addr_le_t *addr, int8_t rssi,
 		}
 		break;
 	case NODE:
-		// BT_DBG("Incoming Node Id beacon");
+		BT_DBG("Incoming Node Id beacon");
 		if(node_id_lkp.addr == 0)
 		{
 			return;
@@ -876,10 +876,8 @@ static struct bt_conn_cb conn_callbacks = {
 
 static void network_id_cb(const bt_addr_le_t *addr, uint16_t net_idx)
 {
-	// TODO: Make connection through net_id configurable
 	int err;
 
-	// BT_DBG("Incoming net adv beacon");
 	if(bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr)){
 		BT_DBG("Allready found address");
 		return;

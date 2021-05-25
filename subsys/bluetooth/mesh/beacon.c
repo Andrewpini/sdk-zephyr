@@ -133,7 +133,6 @@ static int secure_beacon_send(struct bt_mesh_subnet *sub, void *cb_data)
 	#else
 	bt_mesh_adv_send(buf, &send_cb, sub);
 	#endif
-	// bt_mesh_adv_send(buf, &send_cb, sub);
 	net_buf_unref(buf);
 
 	return 0;
@@ -168,7 +167,6 @@ static int unprovisioned_beacon_send(void)
 	net_buf_add_be16(buf, oob_info);
 	net_buf_add_mem(buf, uri_hash, 4);
 
-	// bt_mesh_adv_send(buf, NULL, NULL);
 	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
 	bt_mesh_proxy_cli_relay(&buf->b, 0);
 	switch (bt_mesh_proxy_cli_adv_state_get())
@@ -225,7 +223,6 @@ static int unprovisioned_beacon_send(void)
 			#else
 			bt_mesh_adv_send(buf, NULL, NULL);
 			#endif
-			// bt_mesh_adv_send(buf, NULL, NULL);
 		}
 
 		net_buf_unref(buf);

@@ -63,58 +63,16 @@ struct node_id_lookup {
 
 /** Proxy Client Callbacks. */
 struct bt_mesh_proxy {
-	/** @brief Proxy Network Identity Beacon has been received.
-	 *
-	 *  This callback notifies the application that Proxy Network
-	 *  Identity Beacon has been received.
-	 *
-	 *  @param addr Remote Bluetooth address.
-	 *  @param net_idx NetKeyIndex.
-	 */
+
 	void (*network_id)(const bt_addr_le_t *addr, uint16_t net_idx);
 
-	/** @brief Proxy Node Identity Beacon has been received.
-	 *
-	 *  This callback notifies the application that Node Network
-	 *  Identity Beacon has been received.
-	 *
-	 *  @param addr Remote Bluetooth address.
-	 *  @param net_idx NetKeyIndex.
-	 *  @param node_addr Node Address.
-	 */
 	void (*node_id)(const bt_addr_le_t *addr, uint16_t net_idx,
 			uint16_t node_addr);
 
-	/** @brief A new proxy connection has been established.
-	 *
-	 *  This callback notifies the application of a new connection.
-	 *  In case the err parameter is non-zero it means that the
-	 *  connection establishment failed.
-	 *
-	 *  @param conn New connection object.
-	 *  @param err  Zero for success, non-zero otherwise.
-	 */
 	void (*connected)(struct bt_conn *conn, struct node_id_lookup *addr_ctx, uint8_t reason);
 
-	/** @brief A new proxy connection has been configured.
-	 *
-	 *  This callback notifies the application of a new connection.
-	 *  In case the err parameter is non-zero it means that the
-	 *  connection establishment failed.
-	 *
-	 *  @param conn New connection object.
-	 *  @param err  Zero for success, non-zero otherwise.
-	 */
 	void (*configured)(struct bt_conn *conn, struct node_id_lookup *addr_ctx);
 
-	/** @brief A proxy connection has been disconnected.
-	 *
-	 *  This callback notifies the application that a proxy connection
-	 *  has been disconnected.
-	 *
-	 *  @param conn Connection object.
-	 *  @param reason reason for the disconnection.
-	 */
 	void (*disconnected)(struct bt_conn *conn,
 			     struct node_id_lookup *addr_ctx, uint8_t reason);
 };

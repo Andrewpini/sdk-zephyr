@@ -544,35 +544,17 @@ int bt_mesh_net_send(struct bt_mesh_net_tx *tx, struct net_buf *buf,
 		/* Notify completion if this only went through the Mesh Proxy */
 		send_cb_finalize(cb, cb_data);
 		err = 0;
-		// TODO: Remove?
-		// goto done;
 	}
 
 	#ifdef CONFIG_BT_MESH_PROXY_CLIENT
 	bt_mesh_proxy_cli_relay(&buf->b, tx->ctx->addr);
 	switch (bt_mesh_proxy_cli_adv_state_get())
 		{
-		case BT_MESH_PROXY_CLI_ADV_REDUCED:
-			// printk("BT_MESH_PROXY_CLI_ADV_REDUCED\n");
-			// cred = net_tx_cred_get(tx);
-			// err = net_header_encode(tx, cred->nid, &alt_buf->b);
-			// /* Leave CTL bit intact */
-			// alt_buf->b.data[1] &= 0x80;
-			// alt_buf->b.data[1] |= 0;
-
-			// printk("Duplicate: %s\n", bt_hex(alt_buf->b.data, alt_buf->b.len));
-			// err = net_encrypt(&alt_buf->b, cred, BT_MESH_NET_IVI_TX, false);
-			// if (err) {
-			// 	printk("Fail?\n");
-			// 	goto done;
-			// }
-			bt_mesh_adv_send(buf, cb, cb_data);
-			// TODO: Finn ut hvordan dette skal bli
-			// bt_mesh_adv_send(alt_buf, cb, cb_data);
-			break;
 		case BT_MESH_PROXY_CLI_ADV_DISABLED:
 			printk("BT_MESH_PROXY_CLI_ADV_DISABLED\n");
 			break;
+		case BT_MESH_PROXY_CLI_ADV_REDUCED:
+		// Fallthrough
 		default:
 			printk("BT_MESH_PROXY_CLI_ADV_ENABLED\n");
 			bt_mesh_adv_send(buf, cb, cb_data);
@@ -793,7 +775,6 @@ static void bt_mesh_net_relay(struct net_buf_simple *sbuf,
 			break;
 		case BT_MESH_PROXY_CLI_ADV_DISABLED:
 			printk("BT_MESH_PROXY_CLI_ADV_DISABLED\n");
-			/* code */
 			break;
 		default:
 			printk("BT_MESH_PROXY_CLI_ADV_ENABLED\n");
